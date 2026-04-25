@@ -138,16 +138,34 @@ tabs = st.tabs(["Tonight", "⭐ Best Bets", "🎯 Alt Line Builder", "🪜 Playe
 
 
 # Pre-load shared data
-games_df = load_games(today)
+games_df_all = load_games(today)
+
+# Hide games that have already tipped off — these aren't actionable pre-game
+# and most prop lines are pulled or live-priced once the ball is up.
+_now_iso = datetime.now(timezone.utc).isoformat()
+if not games_df_all.empty and "commence_time" in games_df_all.columns:
+    games_df = games_df_all[
+        games_df_all["commence_time"].isna()
+        | (games_df_all["commence_time"] > _now_iso)
+    ].copy()
+    n_started = len(games_df_all) - len(games_df)
+else:
+    games_df = games_df_all
+    n_started = 0
+
 edges_df = load_edges_for(tuple(games_df["id"].tolist()) if not games_df.empty else tuple())
 
 
 # ── TAB 1 — Tonight ───────────────────────────────────────────────────────────
 with tabs[0]:
     if games_df.empty:
-        st.info("No games scheduled for today (or sync hasn't run yet).")
+        if n_started:
+            st.info(f"All {n_started} of today's games have already started — no pre-game opportunities left. Check back tomorrow.")
+        else:
+            st.info("No games scheduled for today (or sync hasn't run yet).")
     else:
-        st.markdown(f"#### {len(games_df)} games tonight")
+        sub = f" · {n_started} already tipped off (hidden)" if n_started else ""
+        st.markdown(f"#### {len(games_df)} games remaining tonight{sub}")
         for _, g in games_df.iterrows():
             n_edges = len(edges_df[edges_df["game_id"] == g["id"]]) if not edges_df.empty else 0
             n_strong = len(edges_df[(edges_df["game_id"] == g["id"]) & (edges_df["edge"] >= EDGE_STRONG_THRESHOLD)]) if not edges_df.empty else 0

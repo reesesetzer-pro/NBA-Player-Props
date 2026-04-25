@@ -93,10 +93,17 @@ def fetch_event_props(event_id: str) -> dict:
     return out
 
 
-def _resolve_game_id(odds_event_id: str, home_team: str, away_team: str) -> Optional[str]:
+def _resolve_game_id(
+    odds_event_id: str,
+    home_team: str,
+    away_team: str,
+    commence_time: Optional[str] = None,
+) -> Optional[str]:
     """Find the matching nba_games.id for an Odds API event.
 
-    Strategy: match on (game_date == today, home_abbr, away_abbr).
+    Strategy: match on (game_date == today, home_abbr, away_abbr). Also
+    backfills odds_event_id and commence_time onto the game row so the
+    dashboard can filter out games that have already tipped off.
     """
     from datetime import date as _d
     today = _d.today().isoformat()
@@ -107,8 +114,10 @@ def _resolve_game_id(odds_event_id: str, home_team: str, away_team: str) -> Opti
             .eq("home_abbr", home_abbr).eq("away_abbr", away_abbr).execute())
     if resp.data:
         gid = resp.data[0]["id"]
-        # Stamp the odds_event_id back onto nba_games so future joins can use it
-        sb.table("nba_games").update({"odds_event_id": odds_event_id}).eq("id", gid).execute()
+        update = {"odds_event_id": odds_event_id}
+        if commence_time:
+            update["commence_time"] = commence_time
+        sb.table("nba_games").update(update).eq("id", gid).execute()
         return gid
     return None
 
@@ -119,7 +128,8 @@ def parse_game_odds(events: list[dict]) -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
     for e in events:
         eid = e.get("id", "")
-        gid = _resolve_game_id(eid, e.get("home_team", ""), e.get("away_team", ""))
+        gid = _resolve_game_id(eid, e.get("home_team", ""), e.get("away_team", ""),
+                               commence_time=e.get("commence_time"))
         if not gid:
             continue
         for bm in e.get("bookmakers", []) or []:
