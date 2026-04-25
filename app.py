@@ -401,38 +401,154 @@ with tabs[2]:
                     </div>
                     """, unsafe_allow_html=True)
 
-            # ── MANUAL BUILDER ────────────────────────────────────────────────
+            # ── BROWSE A PLAYER + BASKET ──────────────────────────────────────
             st.markdown("---")
-            st.markdown("### 🛠 Manual builder")
-            st.caption("Pick exact legs yourself — combined win% and payout update live.")
+            st.markdown("### 🪜 Browse a player's full alt ladder")
+            st.caption("Pick any player to see every alt line they have on DK + FD. Click **+ Basket** on lines you want — bottom of page shows combined parlay math.")
 
-            pool["label"] = (
-                pool["player_name"] + "  ·  Over " + pool["line"].astype(str) + " "
-                + pool["market_base"].apply(_market_short)
-                + "  ·  " + (pool["model_prob"]*100).round(1).astype(str) + "%  "
-                + pool["best_price"].apply(fmt_odds) + " ("
-                + pool["best_book"].apply(_book_short) + ")"
+            # Browse pool: ALL Over lines for any player (ignore min_prob/min_edge filters
+            # so you can see the full ladder even on safer/longer-shot lines).
+            browse_df = edges_df[
+                (edges_df["over_under"] == "Over")
+                & (edges_df["market_base"].isin(market_pick))
+            ].copy().sort_values(["player_name", "market_base", "line"])
+
+            all_players = sorted(browse_df["player_name"].dropna().unique().tolist())
+            selected_player = st.selectbox(
+                "Player", ["— select —"] + all_players, index=0, key="alt_browse_player",
             )
-            picked = st.multiselect(
-                "Select legs", pool["label"].tolist(), max_selections=8,
-                key="manual_legs",
-            )
-            if picked:
-                p_rows = pool[pool["label"].isin(picked)]
-                legs = [Leg(
-                    player_name=r["player_name"], team_abbr=r["team_abbr"],
-                    market_base=r["market_base"], line=float(r["line"]),
-                    over_under=r["over_under"], price=int(r["best_price"]),
-                    model_prob=float(r["model_prob"]), game_id=str(r["game_id"]),
-                    book=str(r["best_book"]),
-                ) for _, r in p_rows.iterrows()]
-                pp = build_parlay(legs)
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Legs", len(legs))
-                c2.metric("Combined win %", f"{pp.adjusted_prob*100:.1f}%",
-                          help=f"Independence math: {pp.independent_prob*100:.1f}%")
-                c3.metric("Payout", fmt_odds(pp.american_odds))
-                c4.metric("Edge", f"{pp.edge*100:+.1f}%")
+
+            if selected_player != "— select —":
+                p_lines = browse_df[browse_df["player_name"] == selected_player]
+                if p_lines.empty:
+                    st.info("No lines available for this player + market filter.")
+                else:
+                    team = p_lines.iloc[0]["team_abbr"]
+                    n_lines = len(p_lines)
+                    n_strong = (p_lines["edge"] >= EDGE_STRONG_THRESHOLD).sum()
+                    fitted_mu = p_lines.iloc[0].get("fitted_mu", "—")
+
+                    # Player header card
+                    st.markdown(f"""
+                    <div class="nba-card nba-card-strong">
+                      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+                        <div>
+                          <div style="font-size:20px; font-weight:800; color:#E2E2EE;">
+                            {selected_player} <span style="color:#888; font-weight:400; font-size:14px;">({team})</span>
+                          </div>
+                          <div style="font-size:12px; color:#888; margin-top:4px;">
+                            {n_lines} priced lines · {n_strong} strong (≥7% edge) · fitted μ={fitted_mu}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Group by market — render each as a section with Add buttons per line
+                    for mkt, mkt_grp in p_lines.groupby("market_base"):
+                        n_alt = mkt_grp["is_alt"].fillna(False).sum()
+                        st.markdown(f"##### {_market_label(mkt)}  "
+                                    f"<span style='color:#888;font-size:12px;'>"
+                                    f"({len(mkt_grp)} lines · {n_alt} alt)</span>",
+                                    unsafe_allow_html=True)
+
+                        # Header row
+                        h = st.columns([1.2, 1.4, 1.4, 1.2, 0.8, 0.9])
+                        h[0].markdown("<div class='stat-label'>LINE</div>", unsafe_allow_html=True)
+                        h[1].markdown("<div class='stat-label'>WIN %</div>", unsafe_allow_html=True)
+                        h[2].markdown("<div class='stat-label'>EDGE</div>", unsafe_allow_html=True)
+                        h[3].markdown("<div class='stat-label'>PRICE</div>", unsafe_allow_html=True)
+                        h[4].markdown("<div class='stat-label'>BOOK</div>", unsafe_allow_html=True)
+                        h[5].markdown("&nbsp;", unsafe_allow_html=True)
+
+                        for _, r in mkt_grp.iterrows():
+                            c = st.columns([1.2, 1.4, 1.4, 1.2, 0.8, 0.9])
+                            alt_tag = " 🪜" if r.get("is_alt") else ""
+                            c[0].markdown(f"**Over {r['line']}**{alt_tag}")
+                            # Win % bar
+                            prob = float(r["model_prob"])
+                            color = "#00FF88" if prob >= 0.85 else ("#00D4FF" if prob >= 0.65 else "#FFD700")
+                            c[1].markdown(
+                                f"<div style='font-family:Space Mono,monospace; color:{color}; font-weight:700;'>"
+                                f"{prob*100:.1f}%</div>", unsafe_allow_html=True,
+                            )
+                            edge = float(r["edge"])
+                            edge_color = "#00FF88" if edge >= EDGE_STRONG_THRESHOLD else (
+                                         "#FFD700" if edge >= EDGE_SOFT_THRESHOLD else (
+                                         "#888" if edge > -0.02 else "#FF6B35"))
+                            c[2].markdown(
+                                f"<div style='font-family:Space Mono,monospace; color:{edge_color}; font-weight:700;'>"
+                                f"{edge*100:+.1f}%</div>", unsafe_allow_html=True,
+                            )
+                            c[3].markdown(
+                                f"<div style='font-family:Space Mono,monospace;'>{fmt_odds(r['best_price'])}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            c[4].markdown(f"<span style='color:#888;'>{_book_short(r['best_book'])}</span>",
+                                          unsafe_allow_html=True)
+                            if c[5].button("+ Basket", key=f"basket_add_{r['id']}", use_container_width=True):
+                                if "alt_basket" not in st.session_state:
+                                    st.session_state.alt_basket = []
+                                if r["id"] not in [x["id"] for x in st.session_state.alt_basket]:
+                                    st.session_state.alt_basket.append({
+                                        "id":          r["id"],
+                                        "player_name": r["player_name"],
+                                        "team_abbr":   r["team_abbr"],
+                                        "market_base": r["market_base"],
+                                        "line":        float(r["line"]),
+                                        "over_under":  r["over_under"],
+                                        "best_price":  int(r["best_price"]),
+                                        "best_book":   r["best_book"],
+                                        "model_prob":  float(r["model_prob"]),
+                                        "game_id":     r["game_id"],
+                                        "edge":        float(r["edge"]),
+                                    })
+                                    st.rerun()
+
+            # ── PARLAY BASKET ─────────────────────────────────────────────────
+            st.markdown("---")
+            basket = st.session_state.get("alt_basket", [])
+            head_cols = st.columns([5, 1])
+            head_cols[0].markdown(f"### 🛒 Parlay Basket  <span style='color:#888;font-weight:400;font-size:14px;'>· {len(basket)} leg{'s' if len(basket)!=1 else ''}</span>", unsafe_allow_html=True)
+            if basket and head_cols[1].button("🗑 Clear", key="basket_clear"):
+                st.session_state.alt_basket = []
+                st.rerun()
+
+            if not basket:
+                st.info("Empty — click **+ Basket** on any line above to add it. The basket persists while you browse different players.")
+            else:
+                # Render legs with remove buttons
+                for leg in basket:
+                    c = st.columns([3, 1, 1, 1, 0.6])
+                    c[0].markdown(f"**{leg['player_name']}** "
+                                  f"<span style='color:#888;'>({leg['team_abbr']})</span> · "
+                                  f"Over <strong>{leg['line']}</strong> {_market_short(leg['market_base'])}",
+                                  unsafe_allow_html=True)
+                    c[1].markdown(f"<span style='color:#00D4FF;'>{leg['model_prob']*100:.1f}%</span>",
+                                  unsafe_allow_html=True)
+                    c[2].markdown(f"{fmt_odds(leg['best_price'])}")
+                    c[3].markdown(f"<span style='color:#888;'>{_book_short(leg['best_book'])}</span>",
+                                  unsafe_allow_html=True)
+                    if c[4].button("✕", key=f"basket_remove_{leg['id']}"):
+                        st.session_state.alt_basket = [x for x in basket if x["id"] != leg["id"]]
+                        st.rerun()
+
+                # Combined math
+                legs_obj = [Leg(
+                    player_name=L["player_name"], team_abbr=L["team_abbr"],
+                    market_base=L["market_base"], line=L["line"],
+                    over_under=L["over_under"], price=L["best_price"],
+                    model_prob=L["model_prob"], game_id=L["game_id"],
+                    book=L["best_book"],
+                ) for L in basket]
+                pp = build_parlay(legs_obj)
+                st.markdown("")
+                m = st.columns(4)
+                m[0].metric("Legs", len(basket))
+                m[1].metric("Combined win %", f"{pp.adjusted_prob*100:.1f}%",
+                            help=f"Independence math: {pp.independent_prob*100:.1f}%")
+                m[2].metric("Payout", fmt_odds(pp.american_odds))
+                m[3].metric("Edge", f"{pp.edge*100:+.1f}%")
                 if pp.notes:
                     st.caption("Adjustments: " + " · ".join(pp.notes))
 
