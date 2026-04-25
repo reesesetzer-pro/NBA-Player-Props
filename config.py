@@ -15,14 +15,23 @@ load_dotenv()
 
 # ── Secrets resolution (local .env → Streamlit secrets) ───────────────────────
 def _secret(key: str, default: str = "") -> str:
-    val = os.getenv(key, "")
-    if val:
-        return val
+    """Resolve a secret from Streamlit Cloud first (st.secrets), then env vars.
+
+    Streamlit Cloud injects secrets into st.secrets at app startup; checking
+    that source first avoids a cold-start race where os.getenv() runs before
+    Streamlit has propagated the secrets to the process environment.
+    """
     try:
         import streamlit as st
-        return st.secrets.get(key, default)
+        if hasattr(st, "secrets"):
+            try:
+                if key in st.secrets:
+                    return str(st.secrets[key])
+            except Exception:
+                pass
     except Exception:
-        return default
+        pass
+    return os.getenv(key, default)
 
 
 ODDS_API_KEY  = _secret("ODDS_API_KEY")
