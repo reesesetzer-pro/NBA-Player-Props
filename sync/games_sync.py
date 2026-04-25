@@ -2,13 +2,51 @@
 from __future__ import annotations
 from datetime import datetime, timezone, date
 from typing import Optional
+import re
 import time
 
 import pandas as pd
+import pytz
 from nba_api.stats.endpoints import scoreboardv2, leaguegamelog
 
 from config import CURRENT_SEASON, NBA_TEAMS
 from utils.db import upsert, fetch
+
+ET = pytz.timezone("America/New_York")
+_TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*(am|pm)\s*ET\s*$", re.I)
+
+
+def _parse_status(status_text: str, status_id: int, game_date: date) -> tuple[Optional[str], str]:
+    """Return (commence_time_iso_utc, game_state).
+
+    NBA scoreboardv2's GAME_STATUS_TEXT is one of:
+      * "1:00 pm ET" / "8:00 PM ET"  → upcoming, parse tipoff time
+      * "Final" / "Final/OT"          → game finished
+      * "Q3 4:30" / "Half"            → in progress
+      * "PPD" / "Postponed"           → postponed
+    GAME_STATUS_ID:  1=scheduled  2=in-progress  3=final
+    """
+    text = (status_text or "").strip()
+    state = "scheduled"
+    if status_id == 3 or text.lower().startswith("final"):
+        state = "final"
+    elif status_id == 2:
+        state = "live"
+    elif "ppd" in text.lower() or "postpon" in text.lower():
+        state = "postponed"
+
+    ct_iso = None
+    m = _TIME_RE.match(text)
+    if m and state == "scheduled":
+        h, mi, ampm = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+        if ampm == "PM" and h != 12: h += 12
+        if ampm == "AM" and h == 12: h = 0
+        try:
+            et_dt = ET.localize(datetime(game_date.year, game_date.month, game_date.day, h, mi))
+            ct_iso = et_dt.astimezone(timezone.utc).isoformat()
+        except Exception:
+            ct_iso = None
+    return ct_iso, state
 
 
 def _last_game_date(team_logs: pd.DataFrame, team_abbr: str, before: date) -> Optional[date]:
@@ -85,6 +123,13 @@ def run_games_sync(target_date: Optional[date] = None) -> None:
         # Determine playoff vs regular based on game_id prefix (00 = regular, 004 = playoffs)
         season_type = "playoffs" if gid.startswith("004") else "regular"
 
+        # Parse tip time + status from scoreboard's GAME_STATUS fields
+        ct_iso, game_state = _parse_status(
+            str(g.get("GAME_STATUS_TEXT", "")),
+            int(g.get("GAME_STATUS_ID", 0) or 0),
+            target_date,
+        )
+
         rows.append({
             "id":             gid,
             "game_date":      target_date.isoformat(),
@@ -94,9 +139,9 @@ def run_games_sync(target_date: Optional[date] = None) -> None:
             "away_abbr":      away_abbr,
             "home_team":      NBA_TEAMS.get(home_abbr, ""),
             "away_team":      NBA_TEAMS.get(away_abbr, ""),
-            "commence_time":  None,                       # populated by odds_sync
+            "commence_time":  ct_iso,                     # NBA-derived; odds_sync may override
             "odds_event_id":  None,
-            "game_state":     "scheduled",
+            "game_state":     game_state,
             "is_b2b_home":    (rd_h == 0) if rd_h is not None else None,
             "is_b2b_away":    (rd_a == 0) if rd_a is not None else None,
             "rest_days_home": rd_h,

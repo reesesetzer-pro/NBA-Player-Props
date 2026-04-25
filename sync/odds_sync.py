@@ -115,8 +115,19 @@ def _resolve_game_id(
     if resp.data:
         gid = resp.data[0]["id"]
         update = {"odds_event_id": odds_event_id}
+        # Only stamp commence_time if it's within 24 hours of "now" — i.e.,
+        # this Odds API event is genuinely tonight's game. Without this check
+        # the Odds API can serve the NEXT game in a playoff series under the
+        # same team-pair (different date entirely), and stamping that future
+        # time would mark a finished game as still upcoming.
         if commence_time:
-            update["commence_time"] = commence_time
+            try:
+                ct = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                hours_away = (ct - datetime.now(timezone.utc)).total_seconds() / 3600
+                if -6 <= hours_away <= 24:
+                    update["commence_time"] = commence_time
+            except Exception:
+                pass
         sb.table("nba_games").update(update).eq("id", gid).execute()
         return gid
     return None

@@ -140,14 +140,27 @@ tabs = st.tabs(["Tonight", "⭐ Best Bets", "🎯 Alt Line Builder", "🪜 Playe
 # Pre-load shared data
 games_df_all = load_games(today)
 
-# Hide games that have already tipped off — these aren't actionable pre-game
-# and most prop lines are pulled or live-priced once the ball is up.
-_now_iso = datetime.now(timezone.utc).isoformat()
-if not games_df_all.empty and "commence_time" in games_df_all.columns:
-    games_df = games_df_all[
-        games_df_all["commence_time"].isna()
-        | (games_df_all["commence_time"] > _now_iso)
-    ].copy()
+# Hide games that are already done. A game is hidden if either:
+#   * game_state is "final" / "live" / "postponed" (NBA-authoritative)
+#   * commence_time is in the past OR > 24h in the future (out-of-window).
+# Games with no time AND scheduled state stay visible (safer default).
+_now_dt = datetime.now(timezone.utc)
+if not games_df_all.empty:
+    def _is_pregame(row):
+        state = str(row.get("game_state") or "scheduled").lower()
+        if state in ("final", "live", "postponed"):
+            return False
+        ct = row.get("commence_time")
+        if ct is None or pd.isna(ct):
+            return True
+        try:
+            ct_dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+        except Exception:
+            return True
+        hours_away = (ct_dt - _now_dt).total_seconds() / 3600
+        return 0 < hours_away <= 24
+
+    games_df = games_df_all[games_df_all.apply(_is_pregame, axis=1)].copy()
     n_started = len(games_df_all) - len(games_df)
 else:
     games_df = games_df_all
