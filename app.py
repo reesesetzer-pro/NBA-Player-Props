@@ -342,6 +342,51 @@ with tabs[2]:
         st.markdown(f"**{len(pool)} qualifying alt-line legs** "
                     f"(after filtering & per-player dedupe)")
 
+        # ── TRACKED PLAYERS panel ────────────────────────────────────────────
+        tracked = st.session_state.get("tracked_players", [])
+        if tracked:
+            st.markdown(f"### ⭐ Tracked Players  <span style='color:#888;font-weight:400;font-size:14px;'>· {len(tracked)} on watchlist</span>",
+                        unsafe_allow_html=True)
+            for tp in tracked:
+                t_lines = edges_df[
+                    (edges_df["player_name"] == tp)
+                    & (edges_df["over_under"] == "Over")
+                    & (edges_df["market_base"].isin(market_pick))
+                ].copy()
+                if t_lines.empty:
+                    st.markdown(f"<div class='nba-card' style='padding:10px 16px;'>"
+                                f"⭐ <strong>{tp}</strong> "
+                                f"<span style='color:#888;font-size:12px;'>· no lines match current market filter</span></div>",
+                                unsafe_allow_html=True)
+                    continue
+                team = t_lines.iloc[0]["team_abbr"]
+                # Top 3 plays for this player by edge
+                top_picks = t_lines.sort_values("edge", ascending=False).head(3)
+                picks_html = "".join(
+                    f"<div style='display:flex;justify-content:space-between;padding:4px 0;'>"
+                    f"<span>Over <strong>{r['line']}</strong> {_market_short(r['market_base'])}"
+                    f"{' 🪜' if r.get('is_alt') else ''}</span>"
+                    f"<span style='font-family:Space Mono,monospace;color:#B8B8D4;'>"
+                    f"<span style='color:#00D4FF;'>{r['model_prob']*100:.1f}%</span> · "
+                    f"<span style='color:{'#00FF88' if r['edge']>=EDGE_STRONG_THRESHOLD else '#FFD700'};'>{r['edge']*100:+.1f}%</span> · "
+                    f"{fmt_odds(r['best_price'])} ({_book_short(r['best_book'])})</span>"
+                    f"</div>"
+                    for _, r in top_picks.iterrows()
+                )
+                untrack_cols = st.columns([5, 1])
+                untrack_cols[0].markdown(f"""
+                <div class="nba-card nba-card-strong" style="margin-bottom:6px;">
+                  <div style="font-size:15px;font-weight:700;color:#E2E2EE;">
+                    ⭐ {tp} <span style='color:#888;font-weight:400;font-size:12px;'>({team})</span>
+                  </div>
+                  <div style="margin-top:8px;font-size:13px;">{picks_html}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                if untrack_cols[1].button("✕ Untrack", key=f"untrack_{tp}", use_container_width=True):
+                    st.session_state.tracked_players = [p for p in tracked if p != tp]
+                    st.rerun()
+            st.markdown("---")
+
         if pool.empty:
             st.info("No legs match the filters. Try lowering Min win % or expanding markets.")
         else:
@@ -428,21 +473,34 @@ with tabs[2]:
                     n_strong = (p_lines["edge"] >= EDGE_STRONG_THRESHOLD).sum()
                     fitted_mu = p_lines.iloc[0].get("fitted_mu", "—")
 
-                    # Player header card
-                    st.markdown(f"""
-                    <div class="nba-card nba-card-strong">
-                      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
-                        <div>
-                          <div style="font-size:20px; font-weight:800; color:#E2E2EE;">
-                            {selected_player} <span style="color:#888; font-weight:400; font-size:14px;">({team})</span>
-                          </div>
-                          <div style="font-size:12px; color:#888; margin-top:4px;">
-                            {n_lines} priced lines · {n_strong} strong (≥7% edge) · fitted μ={fitted_mu}
+                    # Player header card with Track button
+                    is_tracked = selected_player in st.session_state.get("tracked_players", [])
+                    star = "⭐" if is_tracked else "☆"
+                    h_cols = st.columns([4, 1])
+                    with h_cols[0]:
+                        st.markdown(f"""
+                        <div class="nba-card nba-card-strong" style="margin-bottom:8px;">
+                          <div style="display:flex; align-items:center; gap:14px;">
+                            <div>
+                              <div style="font-size:20px; font-weight:800; color:#E2E2EE;">
+                                {selected_player} <span style="color:#888; font-weight:400; font-size:14px;">({team})</span>
+                              </div>
+                              <div style="font-size:12px; color:#888; margin-top:4px;">
+                                {n_lines} priced lines · {n_strong} strong (≥7% edge) · fitted μ={fitted_mu}
+                              </div>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                        """, unsafe_allow_html=True)
+                    with h_cols[1]:
+                        track_label = f"{star} Untrack" if is_tracked else f"{star} Track player"
+                        if st.button(track_label, key=f"track_{selected_player}", use_container_width=True):
+                            tracked = st.session_state.get("tracked_players", [])
+                            if is_tracked:
+                                st.session_state.tracked_players = [p for p in tracked if p != selected_player]
+                            else:
+                                st.session_state.tracked_players = tracked + [selected_player]
+                            st.rerun()
 
                     # Group by market — render each as a section with Add buttons per line
                     for mkt, mkt_grp in p_lines.groupby("market_base"):
