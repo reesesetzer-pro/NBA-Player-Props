@@ -315,8 +315,8 @@ with tabs[2]:
         # Pool filters — min win % is the primary lever; min price is a safety
         # net to keep extreme chalk out of the suggester.
         c1, c2, c3, c4, c5 = st.columns(5)
-        min_prob = c1.slider("Min win %", 0.55, 0.99, 0.67, 0.01, format="%.2f",
-                             help="Each leg must clear this model probability. Default 67% — set to ~70% for safer legs, 60% for more options.")
+        min_prob = c1.slider("Min win %", 0.60, 0.99, 0.67, 0.01, format="%.2f",
+                             help="Each leg must clear this model probability. Default 67% — slide down to 60% for more leg options, up to ~75% for safer combos.")
         min_edge_floor = c2.slider("Min edge", -0.05, 0.20, 0.00, 0.01, format="%.2f",
                                    help="0 = include legs where model agrees with market")
         min_price = c3.slider("Min price (American)", -500, +200, -200, 5,
