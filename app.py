@@ -312,14 +312,15 @@ with tabs[2]:
     if edges_df.empty:
         st.info("No edges yet.")
     else:
-        # Pool filters
+        # Pool filters — min win % is the primary lever; min price is a safety
+        # net to keep extreme chalk out of the suggester.
         c1, c2, c3, c4, c5 = st.columns(5)
-        min_prob = c1.slider("Min win %", 0.50, 0.99, 0.85, 0.01, format="%.2f",
-                             help="Each leg must clear this probability")
+        min_prob = c1.slider("Min win %", 0.55, 0.99, 0.67, 0.01, format="%.2f",
+                             help="Each leg must clear this model probability. Default 67% — set to ~70% for safer legs, 60% for more options.")
         min_edge_floor = c2.slider("Min edge", -0.05, 0.20, 0.00, 0.01, format="%.2f",
                                    help="0 = include legs where model agrees with market")
-        min_price = c3.slider("Min price (American)", -300, +200, -130, 5,
-                              help="Filter out super-chalk legs. -130 default = no leg juicier than -130.")
+        min_price = c3.slider("Min price (American)", -500, +200, -200, 5,
+                              help="Extreme-chalk guard. -200 default = nothing juicier than -200; rarely binds when min win % is set sensibly.")
         n_legs = c4.selectbox("Legs", [2, 3, 4, 5], index=1)
         market_pick = c5.multiselect(
             "Markets", ["pts", "reb", "ast", "pra", "fg3m"],
@@ -394,10 +395,9 @@ with tabs[2]:
             st.info("No legs match the filters. Try lowering Min win % or expanding markets.")
         else:
             # ── AUTO-SUGGESTED PARLAYS — HIGH-PROB ────────────────────────────
-            min_price_label = f"{min_price:+d}" if min_price > 0 else f"{min_price}"
-            st.markdown(f"### 🟢 Best {min_price_label} or better — by win likelihood")
-            st.caption("Highest combined-win-% parlays where every leg pays at least the min-price floor. "
-                       "Designed for high-hit-rate plays (smaller payouts but high cash rate).")
+            st.markdown(f"### 🟢 Best {int(min_prob*100)}%+ legs — by win likelihood")
+            st.caption(f"Highest combined-win-% parlays where every leg has model probability ≥ {int(min_prob*100)}% "
+                       f"and price ≥ {min_price:+d}. Designed for high-hit-rate plays.")
             cand_legs = [Leg(
                 player_name=r["player_name"], team_abbr=r["team_abbr"],
                 market_base=r["market_base"], line=float(r["line"]),
