@@ -62,7 +62,7 @@ NBA_SPORT_KEY = "basketball_nba"
 
 # Restricted to DraftKings + FanDuel — both sharp on player props, used as
 # no-vig consensus and as the only books we'll log bets at.
-BOOKS = ["draftkings", "fanduel"]
+BOOKS = ["draftkings", "fanduel", "fanatics"]
 
 # Game-level markets (bulk endpoint supports h2h/spreads/totals)
 MARKETS_GAME = ["h2h", "spreads", "totals"]
