@@ -65,13 +65,26 @@ def fetch(table: str, filters: Optional[Dict] = None, limit: int = 1000) -> pd.D
     return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
-def fetch_in(table: str, col: str, values: List[Any]) -> pd.DataFrame:
-    """Fetch all rows where `col` is in `values`. Avoids the silent 1000-row cap
-    by scoping the query — use this when you have a known set of IDs."""
+def fetch_in(table: str, col: str, values: List[Any], page: int = 1000) -> pd.DataFrame:
+    """Fetch all rows where `col` is in `values`. Paginated so it doesn't get
+    silently truncated by Supabase's default 1000-row cap on `.select()`.
+    """
     if not values:
         return pd.DataFrame()
-    resp = get_client().table(table).select("*").in_(col, values).execute()
-    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+    client = get_client()
+    out: List[Dict] = []
+    offset = 0
+    while True:
+        resp = (client.table(table).select("*")
+                .in_(col, values)
+                .range(offset, offset + page - 1)
+                .execute())
+        rows = resp.data or []
+        out.extend(rows)
+        if len(rows) < page:
+            break
+        offset += page
+    return pd.DataFrame(out) if out else pd.DataFrame()
 
 
 def fetch_all(table: str, filters: Optional[Dict] = None, page: int = 1000) -> pd.DataFrame:
