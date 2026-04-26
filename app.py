@@ -312,14 +312,16 @@ with tabs[2]:
     if edges_df.empty:
         st.info("No edges yet.")
     else:
-        # Pool: alt OVER lines, prioritized by win prob, with optional edge floor
-        c1, c2, c3, c4 = st.columns(4)
+        # Pool filters
+        c1, c2, c3, c4, c5 = st.columns(5)
         min_prob = c1.slider("Min win %", 0.50, 0.99, 0.85, 0.01, format="%.2f",
                              help="Each leg must clear this probability")
         min_edge_floor = c2.slider("Min edge", -0.05, 0.20, 0.00, 0.01, format="%.2f",
                                    help="0 = include legs where model agrees with market")
-        n_legs = c3.selectbox("Legs", [2, 3, 4, 5], index=1)
-        market_pick = c4.multiselect(
+        min_price = c3.slider("Min price (American)", -300, +200, -130, 5,
+                              help="Filter out super-chalk legs. -130 default = no leg juicier than -130.")
+        n_legs = c4.selectbox("Legs", [2, 3, 4, 5], index=1)
+        market_pick = c5.multiselect(
             "Markets", ["pts", "reb", "ast", "pra", "fg3m"],
             default=["pts", "reb", "ast", "pra"],
         )
@@ -329,6 +331,7 @@ with tabs[2]:
             (edges_df["over_under"] == "Over")
             & (edges_df["model_prob"] >= min_prob)
             & (edges_df["edge"] >= min_edge_floor)
+            & (edges_df["best_price"] >= min_price)
             & (edges_df["market_base"].isin(market_pick))
         ].copy()
 
@@ -466,6 +469,91 @@ with tabs[2]:
                             <div class="stat-value" style="font-size:18px;">{fmt_odds(p.american_odds)}</div></div>
                           <div class="stat-block"><div class="stat-label">EDGE</div>
                             <div class="stat-value" style="color:{'#00FF88' if p.edge>0 else '#FF6B35'};">{p.edge*100:+.1f}%</div></div>
+                        </div>
+                      </div>
+                      {legs_html}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # ── 💰 BEST +300 OR BETTER PARLAY ─────────────────────────────────
+            st.markdown("---")
+            st.markdown("### 💰 Best +300 or better payout")
+            st.caption("Highest combined-win-% parlay whose payout pays at least 3-to-1. Same min-price filter applied; uses a wider pool (drops the per-player dedupe so you can stack alt lines for bigger payouts).")
+
+            # Wider pool for the +300 hunt: include ALL alt lines (no per-player
+            # dedupe) so we can find combos like Player A Over 18 + Player A Over 22
+            # only if user wants — though we still enforce different players.
+            big_pool = edges_df[
+                (edges_df["over_under"] == "Over")
+                & (edges_df["model_prob"] >= max(0.55, min_prob - 0.20))
+                & (edges_df["edge"] >= min_edge_floor)
+                & (edges_df["best_price"] >= min_price)
+                & (edges_df["market_base"].isin(market_pick))
+            ].copy()
+            # Dedupe still per-player to avoid stacking the same player's lines
+            big_pool = big_pool.sort_values(["player_name", "best_price"], ascending=[True, False])
+            big_pool = big_pool.drop_duplicates(subset=["player_name"], keep="first")
+            big_pool = big_pool.sort_values("model_prob", ascending=False).head(60)
+
+            big_legs = [Leg(
+                player_name=r["player_name"], team_abbr=r["team_abbr"],
+                market_base=r["market_base"], line=float(r["line"]),
+                over_under=r["over_under"], price=int(r["best_price"]),
+                model_prob=float(r["model_prob"]), game_id=str(r["game_id"]),
+                book=str(r["best_book"]),
+            ) for _, r in big_pool.iterrows()]
+
+            big_unique = len({L.game_id for L in big_legs})
+            big_combos = []
+            # Try 2-leg, 3-leg, 4-leg combos and find ones with combined ≥ +300
+            for n in (2, 3, 4):
+                if n > len(big_legs):
+                    break
+                for combo in combinations(big_legs, n):
+                    games_in = [L.game_id for L in combo]
+                    players_in = [L.player_name.lower() for L in combo]
+                    if len(set(players_in)) < n:        # never same player twice
+                        continue
+                    if any(games_in.count(g) > 2 for g in set(games_in)):  # max 2 per game
+                        continue
+                    p = build_parlay(list(combo))
+                    if p.american_odds >= 300:
+                        big_combos.append(p)
+
+            # Sort by combined win % desc — we want the SAFEST +300 combo
+            big_combos.sort(key=lambda p: p.adjusted_prob, reverse=True)
+            top_300 = big_combos[:5]
+
+            if not top_300:
+                st.info("No qualifying +300 parlays at current filter settings. Try lowering Min win % "
+                        "or expanding markets to widen the pool.")
+            else:
+                for i, p in enumerate(top_300):
+                    legs_html = "".join(
+                        f"<div style='display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #1E1E30;'>"
+                        f"<div><strong>{L.player_name}</strong> "
+                        f"<span style='color:#888'>({L.team_abbr})</span> · "
+                        f"Over <strong>{L.line}</strong> {_market_short(L.market_base)}</div>"
+                        f"<div style='font-family:Space Mono,monospace; color:#B8B8D4;'>"
+                        f"{L.model_prob*100:.1f}% · {fmt_odds(L.price)} ({_book_short(L.book)})</div>"
+                        f"</div>"
+                        for L in p.legs
+                    )
+                    badge = "💰 BEST 3+ TO 1" if i == 0 else f"#{i+1}"
+                    border = "nba-card-hammer" if i == 0 else "nba-card-soft"
+                    st.markdown(f"""
+                    <div class="nba-card {border}">
+                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <span class="tag-hammer">{badge}</span>
+                        <div style="display:flex; gap:20px;">
+                          <div class="stat-block"><div class="stat-label">COMBINED WIN %</div>
+                            <div class="stat-value" style="color:#00D4FF; font-size:18px;">{p.adjusted_prob*100:.1f}%</div></div>
+                          <div class="stat-block"><div class="stat-label">PAYOUT</div>
+                            <div class="stat-value" style="color:#00FF88; font-size:18px;">{fmt_odds(p.american_odds)}</div></div>
+                          <div class="stat-block"><div class="stat-label">EDGE</div>
+                            <div class="stat-value" style="color:{'#00FF88' if p.edge>0 else '#FF6B35'};">{p.edge*100:+.1f}%</div></div>
+                          <div class="stat-block"><div class="stat-label">LEGS</div>
+                            <div class="stat-value" style="font-size:18px;">{len(p.legs)}</div></div>
                         </div>
                       </div>
                       {legs_html}
