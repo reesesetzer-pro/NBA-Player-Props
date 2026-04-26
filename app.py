@@ -330,24 +330,93 @@ with tabs[2]:
             default=["pts", "reb", "ast", "pra"],
         )
 
-        # Build pool: only OVERs (alt ladders are over-only on most books)
-        pool = edges_df[
+        # Build pool: only OVERs (alt ladders are over-only on most books).
+        # IMPORTANT: nba_prop_edges only stores ONE row per (player, market, line, O/U)
+        # using best_price across books — meaning the per-leg "book" is whichever
+        # book had the best number. To run same-book parlays we need to re-pull
+        # the underlying nba_props rows so we can see each book's price for each
+        # qualifying leg.
+        edge_pool = edges_df[
             (edges_df["over_under"] == "Over")
             & (edges_df["model_prob"] >= min_prob)
             & (edges_df["edge"] >= min_edge_floor)
             & (edges_df["best_price"] >= min_price)
             & (edges_df["market_base"].isin(market_pick))
         ].copy()
+        # Per-player dedupe: keep the LOWEST line for each (player, market_base)
+        # so we never stack a player's own ladder.
+        edge_pool = edge_pool.sort_values(["player_name", "market_base", "line"])
+        edge_pool = edge_pool.drop_duplicates(subset=["player_name", "market_base"], keep="first")
 
-        # For each player+market_base, keep only the line with the LOWEST line value
-        # that still has model_prob ≥ min_prob — that's the "safest clearable" line.
-        # (Higher lines = lower prob; we want the easy clears, not the moonshots.)
-        pool = pool.sort_values(["player_name", "market_base", "line"])
-        pool = pool.drop_duplicates(subset=["player_name", "market_base"], keep="first")
-        pool = pool.sort_values("model_prob", ascending=False).reset_index(drop=True)
+        # Pull the per-book props rows for these qualifying (player, market, line)
+        # combinations — gives us a real per-book price grid.
+        @st.cache_data(ttl=60)
+        def _load_props_for_combos(game_ids: tuple) -> pd.DataFrame:
+            if not game_ids:
+                return pd.DataFrame()
+            return fetch_in("nba_props", "game_id", list(game_ids))
 
-        st.markdown(f"**{len(pool)} qualifying alt-line legs** "
-                    f"(after filtering & per-player dedupe)")
+        props_pool = _load_props_for_combos(tuple(games_df["id"].tolist()) if not games_df.empty else tuple())
+
+        # Build per-book pool: each row is (player, market, line, book, price, model_prob)
+        per_book_legs: dict[str, list[Leg]] = {b: [] for b in BOOKS}
+        if not props_pool.empty:
+            props_pool["player_name_norm"] = props_pool["player_name"].apply(normalize_player_name)
+            # Map (player_norm, line, market_base) → model_prob from edge_pool
+            edge_pool["_market_real"] = edge_pool["market_base"]
+            edge_pool["player_name_norm"] = edge_pool["player_name"].apply(normalize_player_name)
+            edge_index = edge_pool.set_index(
+                ["player_name_norm", "_market_real", "line"]
+            )[["model_prob", "team_abbr", "game_id"]].to_dict(orient="index")
+
+            # Map Odds API market keys → our internal market_base
+            from models.edge_engine import MARKET_TO_STAT
+            for _, p in props_pool.iterrows():
+                if p["over_under"] != "Over":
+                    continue
+                stat_info = MARKET_TO_STAT.get(p["market"])
+                if not stat_info:
+                    continue
+                base, _is_alt = stat_info
+                if base not in market_pick:
+                    continue
+                key = (p["player_name_norm"], base, float(p["line"]))
+                meta = edge_index.get(key)
+                if not meta:
+                    continue
+                price = int(p["price"]) if pd.notna(p["price"]) else None
+                if price is None or price < min_price:
+                    continue
+                book = str(p["book"])
+                if book not in per_book_legs:
+                    continue
+                per_book_legs[book].append(Leg(
+                    player_name=p["player_name"],
+                    team_abbr=str(meta["team_abbr"]),
+                    market_base=base,
+                    line=float(p["line"]),
+                    over_under="Over",
+                    price=price,
+                    model_prob=float(meta["model_prob"]),
+                    game_id=str(meta["game_id"]),
+                    book=book,
+                ))
+
+        # Per-book per-player dedupe — keep the LOWEST line per (player, market) per book
+        for book in per_book_legs:
+            seen: dict[tuple, Leg] = {}
+            # Sort by line asc, so first-seen = lowest line
+            per_book_legs[book].sort(key=lambda L: (L.player_name.lower(), L.market_base, L.line))
+            for L in per_book_legs[book]:
+                k = (L.player_name.lower(), L.market_base)
+                if k not in seen:
+                    seen[k] = L
+            per_book_legs[book] = sorted(seen.values(), key=lambda L: L.model_prob, reverse=True)
+
+        total_legs_all_books = sum(len(v) for v in per_book_legs.values())
+        per_book_summary = " · ".join(f"**{_book_short(b)}**: {len(v)}" for b, v in per_book_legs.items())
+        st.markdown(f"**{total_legs_all_books} qualifying legs total** ({per_book_summary})")
+        st.caption("Parlays below are filtered to **single-book legs only** — what you actually need to place the bet at one sportsbook.")
 
         # ── TRACKED PLAYERS panel ────────────────────────────────────────────
         tracked = st.session_state.get("tracked_players", [])
@@ -394,139 +463,119 @@ with tabs[2]:
                     st.rerun()
             st.markdown("---")
 
-        if pool.empty:
-            st.info("No legs match the filters. Try lowering Min win % or expanding markets.")
-        else:
-            # ── AUTO-SUGGESTED PARLAYS — HIGH-PROB ────────────────────────────
-            st.markdown(f"### 🟢 Best {int(min_prob*100)}%+ legs — by win likelihood")
-            st.caption(f"Highest combined-win-% parlays where every leg has model probability ≥ {int(min_prob*100)}% "
-                       f"and price ≥ {min_price:+d}. Designed for high-hit-rate plays.")
-            cand_legs = [Leg(
-                player_name=r["player_name"], team_abbr=r["team_abbr"],
-                market_base=r["market_base"], line=float(r["line"]),
-                over_under=r["over_under"], price=int(r["best_price"]),
-                model_prob=float(r["model_prob"]), game_id=str(r["game_id"]),
-                book=str(r["best_book"]),
-            ) for _, r in pool.head(60).iterrows()]
-
-            # Auto-cap legs at the # of unique games available (one-per-game keeps
-            # correlation low). On a 2-game slate, default 3-leg becomes 2-leg
-            # rather than returning empty. If user explicitly wants more legs,
-            # we relax to allow same-game pairs but never the same player twice.
-            unique_games = len({L.game_id for L in cand_legs})
-            effective_legs = min(n_legs, max(2, unique_games)) if unique_games > 0 else 0
-            allow_same_game = n_legs > unique_games and unique_games > 0
-
-            mode_note = (
-                f"Best {effective_legs}-leg combos from different games (low correlation)"
-                if not allow_same_game
-                else f"Only {unique_games} games available — relaxing to {effective_legs}-leg with up to 2 legs per game"
-            )
-            st.caption(mode_note + ", ranked by combined win probability.")
-
-            combos = []
-            if effective_legs > 0:
-                for combo in combinations(cand_legs, effective_legs):
-                    games_in_combo = [L.game_id for L in combo]
-                    players_in_combo = [L.player_name.lower() for L in combo]
-                    # Always: never the same player twice
-                    if len(set(players_in_combo)) < effective_legs:
+        # Helper: generate same-book combos across all books, return ranked list
+        def _same_book_combos(per_book: dict[str, list[Leg]], n_legs_req: int,
+                              filter_fn=None) -> list:
+            """Run combinations within each book separately. filter_fn(parlay) → bool."""
+            all_combos = []
+            for book, legs in per_book.items():
+                if not legs:
+                    continue
+                # Trim to top 40 by model_prob per book to keep combinatorics tractable
+                book_legs = legs[:40]
+                if len(book_legs) < n_legs_req:
+                    continue
+                unique_games_b = len({L.game_id for L in book_legs})
+                eff = min(n_legs_req, max(2, unique_games_b))
+                allow_same_game_b = n_legs_req > unique_games_b
+                for combo in combinations(book_legs, eff):
+                    games_in = [L.game_id for L in combo]
+                    players_in = [L.player_name.lower() for L in combo]
+                    if len(set(players_in)) < eff:
                         continue
-                    # Strict mode: every leg from a different game
-                    if not allow_same_game and len(set(games_in_combo)) < effective_legs:
+                    if not allow_same_game_b and len(set(games_in)) < eff:
                         continue
-                    # Relaxed mode: cap at 2 per game
-                    if allow_same_game and any(games_in_combo.count(g) > 2 for g in set(games_in_combo)):
+                    if allow_same_game_b and any(games_in.count(g) > 2 for g in set(games_in)):
                         continue
                     p = build_parlay(list(combo))
-                    combos.append(p)
+                    if filter_fn and not filter_fn(p):
+                        continue
+                    all_combos.append(p)
+            return all_combos
 
+        if total_legs_all_books == 0:
+            st.info("No legs match the filters. Try lowering Min win % or expanding markets.")
+        else:
+            # ── AUTO-SUGGESTED PARLAYS — HIGH-PROB, SAME BOOK ─────────────────
+            st.markdown(f"### 🟢 Best {int(min_prob*100)}%+ legs — by win likelihood")
+            st.caption(f"Highest combined-win-% parlays where every leg has model probability ≥ {int(min_prob*100)}% "
+                       f"and price ≥ {min_price:+d}. **All legs from the same book** so you can place the parlay as one slip.")
+
+            combos = _same_book_combos(per_book_legs, n_legs)
             combos.sort(key=lambda p: p.adjusted_prob, reverse=True)
             top = combos[:5]
 
+            def _book_pill(book: str) -> str:
+                colors = {"draftkings": "#00FF88", "fanduel": "#3B82F6", "fanatics": "#9D4EDD"}
+                bg = colors.get(book, "#888")
+                return (f"<span style='background:{bg}20;color:{bg};border:1px solid {bg}60;"
+                        f"padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;'>"
+                        f"📍 {_book_short(book).upper()}</span>")
+
+            def _render_parlay_card(p, badge: str, border_class: str, payout_color: str = None):
+                book = p.legs[0].book   # all legs same book by construction
+                legs_html = "".join(
+                    f"<div style='display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #1E1E30;'>"
+                    f"<div><strong>{L.player_name}</strong> "
+                    f"<span style='color:#888'>({L.team_abbr})</span> · "
+                    f"Over <strong>{L.line}</strong> {_market_short(L.market_base)}</div>"
+                    f"<div style='font-family:Space Mono,monospace; color:#B8B8D4;'>"
+                    f"{L.model_prob*100:.1f}% · {fmt_odds(L.price)}</div>"
+                    f"</div>"
+                    for L in p.legs
+                )
+                payout_style = f"color:{payout_color};" if payout_color else ""
+                st.markdown(f"""
+                <div class="nba-card {border_class}">
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:10px;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                      <span class="tag-hammer">{badge}</span>
+                      {_book_pill(book)}
+                    </div>
+                    <div style="display:flex; gap:20px;">
+                      <div class="stat-block"><div class="stat-label">COMBINED WIN %</div>
+                        <div class="stat-value" style="color:#00D4FF; font-size:18px;">{p.adjusted_prob*100:.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">PAYOUT</div>
+                        <div class="stat-value" style="font-size:18px;{payout_style}">{fmt_odds(p.american_odds)}</div></div>
+                      <div class="stat-block"><div class="stat-label">EDGE</div>
+                        <div class="stat-value" style="color:{'#00FF88' if p.edge>0 else '#FF6B35'};">{p.edge*100:+.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">LEGS</div>
+                        <div class="stat-value" style="font-size:18px;">{len(p.legs)}</div></div>
+                    </div>
+                  </div>
+                  {legs_html}
+                </div>
+                """, unsafe_allow_html=True)
+
             if not top:
                 st.info(
-                    f"No qualifying parlays. Try lowering Min win % (currently {min_prob*100:.0f}%), "
-                    f"reducing Legs (currently {n_legs}), or expanding markets. "
-                    f"Pool has {len(cand_legs)} legs across {unique_games} games."
+                    f"No qualifying same-book parlays. Try lowering Min win % "
+                    f"(currently {min_prob*100:.0f}%), reducing Legs (currently {n_legs}), "
+                    f"or expanding markets. Pool: {per_book_summary}."
                 )
             else:
                 for i, p in enumerate(top):
-                    legs_html = "".join(
-                        f"<div style='display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #1E1E30;'>"
-                        f"<div><strong>{L.player_name}</strong> "
-                        f"<span style='color:#888'>({L.team_abbr})</span> · "
-                        f"Over <strong>{L.line}</strong> {_market_short(L.market_base)}</div>"
-                        f"<div style='font-family:Space Mono,monospace; color:#B8B8D4;'>"
-                        f"{L.model_prob*100:.1f}% · {fmt_odds(L.price)} ({_book_short(L.book)})</div>"
-                        f"</div>"
-                        for L in p.legs
-                    )
                     badge = "🔨 HAMMER" if i == 0 else f"#{i+1}"
                     border = "nba-card-hammer" if i == 0 else "nba-card-strong"
-                    st.markdown(f"""
-                    <div class="nba-card {border}">
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                        <span class="tag-hammer">{badge}</span>
-                        <div style="display:flex; gap:20px;">
-                          <div class="stat-block"><div class="stat-label">COMBINED WIN %</div>
-                            <div class="stat-value" style="color:#00D4FF; font-size:18px;">{p.adjusted_prob*100:.1f}%</div></div>
-                          <div class="stat-block"><div class="stat-label">PAYOUT</div>
-                            <div class="stat-value" style="font-size:18px;">{fmt_odds(p.american_odds)}</div></div>
-                          <div class="stat-block"><div class="stat-label">EDGE</div>
-                            <div class="stat-value" style="color:{'#00FF88' if p.edge>0 else '#FF6B35'};">{p.edge*100:+.1f}%</div></div>
-                        </div>
-                      </div>
-                      {legs_html}
-                    </div>
-                    """, unsafe_allow_html=True)
+                    _render_parlay_card(p, badge, border)
 
             # ── 💰 BEST +300 OR BETTER PARLAY ─────────────────────────────────
             st.markdown("---")
             st.markdown("### 💰 Best +300 or better payout")
-            st.caption("Highest combined-win-% parlay whose payout pays at least 3-to-1. Same min-price filter applied; uses a wider pool (drops the per-player dedupe so you can stack alt lines for bigger payouts).")
+            st.caption("Highest combined-win-% parlay whose payout pays at least 3-to-1. **All legs from the same book** so you can place it as one slip. Uses a slightly wider pool to find more combos.")
 
-            # Wider pool for the +300 hunt: include ALL alt lines (no per-player
-            # dedupe) so we can find combos like Player A Over 18 + Player A Over 22
-            # only if user wants — though we still enforce different players.
-            big_pool = edges_df[
-                (edges_df["over_under"] == "Over")
-                & (edges_df["model_prob"] >= max(0.55, min_prob - 0.20))
-                & (edges_df["edge"] >= min_edge_floor)
-                & (edges_df["best_price"] >= min_price)
-                & (edges_df["market_base"].isin(market_pick))
-            ].copy()
-            # Dedupe still per-player to avoid stacking the same player's lines
-            big_pool = big_pool.sort_values(["player_name", "best_price"], ascending=[True, False])
-            big_pool = big_pool.drop_duplicates(subset=["player_name"], keep="first")
-            big_pool = big_pool.sort_values("model_prob", ascending=False).head(60)
+            # Per-book pools for the +300 hunt — slightly wider min_prob threshold
+            wider_min_prob = max(0.55, min_prob - 0.10)
+            big_per_book: dict[str, list[Leg]] = {}
+            for book, legs in per_book_legs.items():
+                big_per_book[book] = [L for L in legs if L.model_prob >= wider_min_prob]
 
-            big_legs = [Leg(
-                player_name=r["player_name"], team_abbr=r["team_abbr"],
-                market_base=r["market_base"], line=float(r["line"]),
-                over_under=r["over_under"], price=int(r["best_price"]),
-                model_prob=float(r["model_prob"]), game_id=str(r["game_id"]),
-                book=str(r["best_book"]),
-            ) for _, r in big_pool.iterrows()]
-
-            big_unique = len({L.game_id for L in big_legs})
             big_combos = []
-            # Try 2-leg, 3-leg, 4-leg combos and find ones with combined ≥ +300
             for n in (2, 3, 4):
-                if n > len(big_legs):
-                    break
-                for combo in combinations(big_legs, n):
-                    games_in = [L.game_id for L in combo]
-                    players_in = [L.player_name.lower() for L in combo]
-                    if len(set(players_in)) < n:        # never same player twice
-                        continue
-                    if any(games_in.count(g) > 2 for g in set(games_in)):  # max 2 per game
-                        continue
-                    p = build_parlay(list(combo))
-                    if p.american_odds >= 300:
-                        big_combos.append(p)
+                book_combos = _same_book_combos(big_per_book, n,
+                                                filter_fn=lambda p: p.american_odds >= 300)
+                big_combos.extend(book_combos)
 
-            # Sort by combined win % desc — we want the SAFEST +300 combo
             big_combos.sort(key=lambda p: p.adjusted_prob, reverse=True)
             top_300 = big_combos[:5]
 
@@ -535,36 +584,9 @@ with tabs[2]:
                         "or expanding markets to widen the pool.")
             else:
                 for i, p in enumerate(top_300):
-                    legs_html = "".join(
-                        f"<div style='display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #1E1E30;'>"
-                        f"<div><strong>{L.player_name}</strong> "
-                        f"<span style='color:#888'>({L.team_abbr})</span> · "
-                        f"Over <strong>{L.line}</strong> {_market_short(L.market_base)}</div>"
-                        f"<div style='font-family:Space Mono,monospace; color:#B8B8D4;'>"
-                        f"{L.model_prob*100:.1f}% · {fmt_odds(L.price)} ({_book_short(L.book)})</div>"
-                        f"</div>"
-                        for L in p.legs
-                    )
                     badge = "💰 BEST 3+ TO 1" if i == 0 else f"#{i+1}"
                     border = "nba-card-hammer" if i == 0 else "nba-card-soft"
-                    st.markdown(f"""
-                    <div class="nba-card {border}">
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                        <span class="tag-hammer">{badge}</span>
-                        <div style="display:flex; gap:20px;">
-                          <div class="stat-block"><div class="stat-label">COMBINED WIN %</div>
-                            <div class="stat-value" style="color:#00D4FF; font-size:18px;">{p.adjusted_prob*100:.1f}%</div></div>
-                          <div class="stat-block"><div class="stat-label">PAYOUT</div>
-                            <div class="stat-value" style="color:#00FF88; font-size:18px;">{fmt_odds(p.american_odds)}</div></div>
-                          <div class="stat-block"><div class="stat-label">EDGE</div>
-                            <div class="stat-value" style="color:{'#00FF88' if p.edge>0 else '#FF6B35'};">{p.edge*100:+.1f}%</div></div>
-                          <div class="stat-block"><div class="stat-label">LEGS</div>
-                            <div class="stat-value" style="font-size:18px;">{len(p.legs)}</div></div>
-                        </div>
-                      </div>
-                      {legs_html}
-                    </div>
-                    """, unsafe_allow_html=True)
+                    _render_parlay_card(p, badge, border, payout_color="#00FF88")
 
             # ── BROWSE A PLAYER + BASKET ──────────────────────────────────────
             st.markdown("---")
