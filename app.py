@@ -213,17 +213,20 @@ with tabs[1]:
     if edges_df.empty:
         st.info("No edges yet — run odds_sync + edge_engine first.")
     else:
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
         min_edge = c1.slider("Min edge", 0.0, 0.30, EDGE_SOFT_THRESHOLD, 0.01, format="%.2f")
-        market_filter = c2.multiselect(
+        min_price_bb = c2.slider("Min price (American)", -1000, +200, -550, 10,
+                                 help="Cap how juiced you'll see. Default -550 hides extreme chalk.")
+        market_filter = c3.multiselect(
             "Markets", ["pts", "reb", "ast", "pra", "fg3m", "blk", "stl"],
             default=["pts", "reb", "ast", "pra"],
         )
-        book_filter = c3.multiselect("Books", BOOKS, default=BOOKS)
-        sort_by = c4.selectbox("Sort by", ["Edge", "Win %", "Kelly $"])
+        book_filter = c4.multiselect("Books", BOOKS, default=BOOKS)
+        sort_by = c5.selectbox("Sort by", ["Edge", "Win %", "Kelly $"])
 
         view = edges_df[
             (edges_df["edge"] >= min_edge)
+            & (edges_df["best_price"] >= min_price_bb)
             & (edges_df["market_base"].isin(market_filter))
             & (edges_df["best_book"].isin(book_filter))
         ].copy()
