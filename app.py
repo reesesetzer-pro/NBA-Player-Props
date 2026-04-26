@@ -393,8 +393,11 @@ with tabs[2]:
         if pool.empty:
             st.info("No legs match the filters. Try lowering Min win % or expanding markets.")
         else:
-            # ── AUTO-SUGGESTED PARLAYS ────────────────────────────────────────
-            st.markdown("### 🤖 Top suggested parlays")
+            # ── AUTO-SUGGESTED PARLAYS — HIGH-PROB ────────────────────────────
+            min_price_label = f"{min_price:+d}" if min_price > 0 else f"{min_price}"
+            st.markdown(f"### 🟢 Best {min_price_label} or better — by win likelihood")
+            st.caption("Highest combined-win-% parlays where every leg pays at least the min-price floor. "
+                       "Designed for high-hit-rate plays (smaller payouts but high cash rate).")
             cand_legs = [Leg(
                 player_name=r["player_name"], team_abbr=r["team_abbr"],
                 market_base=r["market_base"], line=float(r["line"]),
