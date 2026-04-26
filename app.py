@@ -392,29 +392,55 @@ with tabs[2]:
         else:
             # ── AUTO-SUGGESTED PARLAYS ────────────────────────────────────────
             st.markdown("### 🤖 Top suggested parlays")
-            st.caption(f"Best {n_legs}-leg combinations from different games (low correlation), ranked by combined win probability.")
-
             cand_legs = [Leg(
                 player_name=r["player_name"], team_abbr=r["team_abbr"],
                 market_base=r["market_base"], line=float(r["line"]),
                 over_under=r["over_under"], price=int(r["best_price"]),
                 model_prob=float(r["model_prob"]), game_id=str(r["game_id"]),
                 book=str(r["best_book"]),
-            ) for _, r in pool.head(40).iterrows()]
+            ) for _, r in pool.head(60).iterrows()]
 
-            # Generate combinations from different games for low correlation
+            # Auto-cap legs at the # of unique games available (one-per-game keeps
+            # correlation low). On a 2-game slate, default 3-leg becomes 2-leg
+            # rather than returning empty. If user explicitly wants more legs,
+            # we relax to allow same-game pairs but never the same player twice.
+            unique_games = len({L.game_id for L in cand_legs})
+            effective_legs = min(n_legs, max(2, unique_games)) if unique_games > 0 else 0
+            allow_same_game = n_legs > unique_games and unique_games > 0
+
+            mode_note = (
+                f"Best {effective_legs}-leg combos from different games (low correlation)"
+                if not allow_same_game
+                else f"Only {unique_games} games available — relaxing to {effective_legs}-leg with up to 2 legs per game"
+            )
+            st.caption(mode_note + ", ranked by combined win probability.")
+
             combos = []
-            for combo in combinations(cand_legs, n_legs):
-                if len({L.game_id for L in combo}) < n_legs:
-                    continue
-                p = build_parlay(list(combo))
-                combos.append(p)
+            if effective_legs > 0:
+                for combo in combinations(cand_legs, effective_legs):
+                    games_in_combo = [L.game_id for L in combo]
+                    players_in_combo = [L.player_name.lower() for L in combo]
+                    # Always: never the same player twice
+                    if len(set(players_in_combo)) < effective_legs:
+                        continue
+                    # Strict mode: every leg from a different game
+                    if not allow_same_game and len(set(games_in_combo)) < effective_legs:
+                        continue
+                    # Relaxed mode: cap at 2 per game
+                    if allow_same_game and any(games_in_combo.count(g) > 2 for g in set(games_in_combo)):
+                        continue
+                    p = build_parlay(list(combo))
+                    combos.append(p)
 
             combos.sort(key=lambda p: p.adjusted_prob, reverse=True)
             top = combos[:5]
 
             if not top:
-                st.info("No multi-game parlays available — try fewer legs or expand filters.")
+                st.info(
+                    f"No qualifying parlays. Try lowering Min win % (currently {min_prob*100:.0f}%), "
+                    f"reducing Legs (currently {n_legs}), or expanding markets. "
+                    f"Pool has {len(cand_legs)} legs across {unique_games} games."
+                )
             else:
                 for i, p in enumerate(top):
                     legs_html = "".join(
