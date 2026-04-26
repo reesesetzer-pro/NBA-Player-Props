@@ -179,9 +179,20 @@ with tabs[0]:
     else:
         sub = f" · {n_started} already tipped off (hidden)" if n_started else ""
         st.markdown(f"#### {len(games_df)} games remaining tonight{sub}")
+
+        # Per-game controls
+        ctl1, ctl2 = st.columns([1, 3])
+        sort_per_game = ctl1.radio(
+            "Sort top picks by", ["Edge", "Win %"], horizontal=True, key="tonight_sort",
+        )
+        st.caption("Each game card shows the **top 3 plays** for that game — by your selected metric. Same min-edge floor as Best Bets (4%).")
+
         for _, g in games_df.iterrows():
-            n_edges = len(edges_df[edges_df["game_id"] == g["id"]]) if not edges_df.empty else 0
-            n_strong = len(edges_df[(edges_df["game_id"] == g["id"]) & (edges_df["edge"] >= EDGE_STRONG_THRESHOLD)]) if not edges_df.empty else 0
+            game_edges = edges_df[edges_df["game_id"] == g["id"]] if not edges_df.empty else pd.DataFrame()
+            n_edges  = len(game_edges)
+            n_strong = (game_edges["edge"] >= EDGE_STRONG_THRESHOLD).sum() if not game_edges.empty else 0
+
+            # Game header card
             st.markdown(f"""
             <div class="nba-card">
               <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
@@ -206,6 +217,45 @@ with tabs[0]:
               </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # Top 3 plays for this game
+            if game_edges.empty:
+                st.caption("  · no edges priced for this game yet")
+                st.markdown("")
+                continue
+            qualifying = game_edges[game_edges["edge"] >= EDGE_SOFT_THRESHOLD].copy()
+            if qualifying.empty:
+                st.caption("  · no plays meet the 4% edge floor")
+                st.markdown("")
+                continue
+            sort_col = "edge" if sort_per_game == "Edge" else "model_prob"
+            top3 = qualifying.sort_values(sort_col, ascending=False).head(3)
+            for _, r in top3.iterrows():
+                tier_class = "nba-card-strong" if r["edge"] >= EDGE_STRONG_THRESHOLD else "nba-card-soft"
+                tag = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
+                st.markdown(f"""
+                <div class="nba-card {tier_class}" style="margin-left:24px; padding:12px 16px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                    <div style="flex:1; min-width:240px;">
+                      <div style="font-size:14px; font-weight:700; color:#E2E2EE;">
+                        {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
+                      </div>
+                      <div style="font-size:12px; color:#B8B8D4; margin-top:3px;">
+                        {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])}  &nbsp; {tag}
+                      </div>
+                    </div>
+                    <div style="display:flex; gap:14px; flex-wrap:wrap;">
+                      <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
+                      <div class="stat-block"><div class="stat-label">WIN %</div>
+                        <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">BEST</div>
+                        <div class="stat-value">{fmt_odds(r['best_price'])}</div>
+                        <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
+                    </div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("")  # spacer between games
 
 
 # ── TAB 2 — Best Bets ─────────────────────────────────────────────────────────
