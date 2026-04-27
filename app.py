@@ -181,11 +181,16 @@ with tabs[0]:
         st.markdown(f"#### {len(games_df)} games remaining tonight{sub}")
 
         # Per-game controls
-        ctl1, ctl2 = st.columns([1, 3])
+        ctl1, ctl2, ctl3 = st.columns([1.2, 1.2, 1])
         sort_per_game = ctl1.radio(
             "Sort top picks by", ["Edge", "Win %"], horizontal=True, key="tonight_sort",
         )
-        st.caption("Each game card shows the **top 3 plays** for that game — by your selected metric. Same min-edge floor as Best Bets (4%).")
+        min_price_tonight = ctl2.slider(
+            "Min price (American)", -1000, +200, -550, 10, key="tonight_min_price",
+            help="Cap how juiced you'll see. Default -550 hides extreme chalk.",
+        )
+        st.caption(f"Each game card shows the **top 3 plays** for that game — by your selected metric. "
+                   f"Same min-edge floor as Best Bets (4%) and prices ≥ {min_price_tonight:+d}.")
 
         for _, g in games_df.iterrows():
             game_edges = edges_df[edges_df["game_id"] == g["id"]] if not edges_df.empty else pd.DataFrame()
@@ -223,7 +228,10 @@ with tabs[0]:
                 st.caption("  · no edges priced for this game yet")
                 st.markdown("")
                 continue
-            qualifying = game_edges[game_edges["edge"] >= EDGE_SOFT_THRESHOLD].copy()
+            qualifying = game_edges[
+                (game_edges["edge"] >= EDGE_SOFT_THRESHOLD)
+                & (game_edges["best_price"] >= min_price_tonight)
+            ].copy()
             if qualifying.empty:
                 st.caption("  · no plays meet the 4% edge floor")
                 st.markdown("")
