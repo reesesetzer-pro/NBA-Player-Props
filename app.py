@@ -124,15 +124,32 @@ def _edge_badge(edge: float) -> str:
 # ── Header ────────────────────────────────────────────────────────────────────
 
 today = date.today().isoformat()
-st.markdown(f"""
-<div class="header-bar">
-  <img src="https://cdn.nba.com/logos/leagues/logo-nba.svg" class="header-logo" alt="NBA"/>
-  <div>
-    <h1 class="header-title">NBA Player Props Model</h1>
-    <div class="header-sub">{today} · DraftKings + FanDuel · alt-ladder pricing · neg-bin distribution model</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+hdr1, hdr2 = st.columns([3, 2])
+with hdr1:
+    st.markdown(f"""
+    <div class="header-bar" style="border:none; padding:14px 0 0 0;">
+      <img src="https://cdn.nba.com/logos/leagues/logo-nba.svg" class="header-logo" alt="NBA"/>
+      <div>
+        <h1 class="header-title">NBA Player Props Model</h1>
+        <div class="header-sub">{today} · DK + FD + Fanatics · alt-ladder pricing · neg-bin distribution</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+with hdr2:
+    st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+    book_choice_pretty = st.multiselect(
+        "📍 Books to show (applies to every tab)",
+        options=["DraftKings", "FanDuel", "Fanatics"],
+        default=["DraftKings", "FanDuel", "Fanatics"],
+        key="global_book_filter",
+    )
+
+# Map pretty names → internal book keys used in nba_props.book / nba_prop_edges.best_book
+_BOOK_PRETTY_TO_KEY = {"DraftKings": "draftkings", "FanDuel": "fanduel", "Fanatics": "fanatics"}
+selected_books = [_BOOK_PRETTY_TO_KEY[b] for b in book_choice_pretty] or list(_BOOK_PRETTY_TO_KEY.values())
+
+st.markdown("<hr style='margin:8px 0 16px 0; border:none; border-top:1px solid #1E1E30;' />",
+            unsafe_allow_html=True)
 
 tabs = st.tabs(["Tonight", "⭐ Best Bets", "🎯 Alt Line Builder", "🪜 Player Intel", "📓 Bet Journal"])
 
@@ -166,7 +183,15 @@ else:
     games_df = games_df_all
     n_started = 0
 
-edges_df = load_edges_for(tuple(games_df["id"].tolist()) if not games_df.empty else tuple())
+edges_df_all = load_edges_for(tuple(games_df["id"].tolist()) if not games_df.empty else tuple())
+
+# Apply global book filter — restrict to edges where the BEST price came from a
+# selected book. (Note: edges store best_price across all books; if user wants
+# only DK plays we filter to those where DK had the best.)
+if not edges_df_all.empty and selected_books and "best_book" in edges_df_all.columns:
+    edges_df = edges_df_all[edges_df_all["best_book"].isin(selected_books)].copy()
+else:
+    edges_df = edges_df_all
 
 
 # ── TAB 1 — Tonight ───────────────────────────────────────────────────────────
@@ -271,7 +296,7 @@ with tabs[1]:
     if edges_df.empty:
         st.info("No edges yet — run odds_sync + edge_engine first.")
     else:
-        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
+        c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1])
         min_edge = c1.slider("Min edge", 0.0, 0.30, EDGE_SOFT_THRESHOLD, 0.01, format="%.2f")
         min_price_bb = c2.slider("Min price (American)", -1000, +200, -550, 10,
                                  help="Cap how juiced you'll see. Default -550 hides extreme chalk.")
@@ -279,14 +304,12 @@ with tabs[1]:
             "Markets", ["pts", "reb", "ast", "pra", "fg3m", "blk", "stl"],
             default=["pts", "reb", "ast", "pra"],
         )
-        book_filter = c4.multiselect("Books", BOOKS, default=BOOKS)
-        sort_by = c5.selectbox("Sort by", ["Edge", "Win %", "Kelly $"])
+        sort_by = c4.selectbox("Sort by", ["Edge", "Win %", "Kelly $"])
 
         view = edges_df[
             (edges_df["edge"] >= min_edge)
             & (edges_df["best_price"] >= min_price_bb)
             & (edges_df["market_base"].isin(market_filter))
-            & (edges_df["best_book"].isin(book_filter))
         ].copy()
 
         if sort_by == "Edge":      view = view.sort_values("edge", ascending=False)
@@ -417,7 +440,8 @@ with tabs[2]:
         props_pool = _load_props_for_combos(tuple(games_df["id"].tolist()) if not games_df.empty else tuple())
 
         # Build per-book pool: each row is (player, market, line, book, price, model_prob)
-        per_book_legs: dict[str, list[Leg]] = {b: [] for b in BOOKS}
+        # Restrict to globally-selected books only — empty multiselect = all
+        per_book_legs: dict[str, list[Leg]] = {b: [] for b in selected_books}
         if not props_pool.empty:
             props_pool["player_name_norm"] = props_pool["player_name"].apply(normalize_player_name)
             # Map (player_norm, line, market_base) → model_prob from edge_pool
