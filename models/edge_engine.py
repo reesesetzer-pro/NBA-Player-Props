@@ -26,6 +26,8 @@ from models.adjustments import compose
 from models.kelly import kelly_dollars
 from utils.db import get_client, fetch, fetch_in, fetch_all, upsert
 from utils.helpers import american_to_implied, remove_vig, normalize_player_name
+from models.calibration import load_calibration_lookup, calibrate_prob
+from models.auto_log_picks import shadow_log_edges
 
 
 # Map Odds API market keys → our internal stat base + alt flag
@@ -308,8 +310,42 @@ def calculate_all_edges() -> int:
         print("[edge] 0 edges produced.")
         return 0
 
+    # ── Empirical calibration ────────────────────────────────────────────────
+    # Apply per-(market × prob_bucket) actual hit rates from settled picks.
+    # The displayed model_prob now reflects what the model PROBABILITY actually
+    # PROVES OUT to in real games, not just the raw model output.
+    # Raw model output is preserved as fitted_mu / fitted_alpha for traceability.
+    try:
+        cal_lookup = load_calibration_lookup(min_n=8)
+        if cal_lookup:
+            adjusted = 0
+            for e in all_edges:
+                raw = e.get("model_prob")
+                if raw is None:
+                    continue
+                cal = calibrate_prob(float(raw), e.get("market_base", ""), cal_lookup)
+                if cal != raw:
+                    e["model_prob_raw"] = round(float(raw), 4)
+                    e["model_prob"] = cal
+                    # Recompute edge with calibrated prob
+                    novig = e.get("market_prob_novig") or 0
+                    e["edge"] = round(cal - float(novig), 4)
+                    adjusted += 1
+            if adjusted:
+                print(f"[edge] calibration applied to {adjusted} legs ({len(cal_lookup)} buckets in lookup)")
+    except Exception as cal_err:
+        print(f"[edge] calibration skipped: {cal_err}")
+
     # Upsert via the helper — handles NaN cleaning + dedupe-by-id automatically
     upsert("nba_prop_edges", all_edges, on_conflict="id")
+
+    # Shadow-log every priced edge so we can grade it after games finish
+    try:
+        n_logged = shadow_log_edges(all_edges)
+        if n_logged:
+            print(f"[edge] shadow-logged {n_logged} picks for grading")
+    except Exception as log_err:
+        print(f"[edge] shadow-log skipped: {log_err}")
 
     soft = sum(1 for e in all_edges if e["edge"] >= EDGE_SOFT_THRESHOLD)
     print(f"[edge] {len(all_edges)} priced | {soft} ≥{int(EDGE_SOFT_THRESHOLD*100)}% edge")
