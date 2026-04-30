@@ -325,7 +325,10 @@ def calculate_all_edges() -> int:
                     continue
                 cal = calibrate_prob(float(raw), e.get("market_base", ""), cal_lookup)
                 if cal != raw:
-                    e["model_prob_raw"] = round(float(raw), 4)
+                    # Note: model_prob_raw not persisted — schema doesn't have
+                    # the column and we don't want a DDL migration. Calibrated
+                    # value replaces raw in-place; raw is recoverable via the
+                    # in-memory calibration lookup if needed for audit.
                     e["model_prob"] = cal
                     # Recompute edge with calibrated prob
                     novig = e.get("market_prob_novig") or 0
