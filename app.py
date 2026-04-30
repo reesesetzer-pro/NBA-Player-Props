@@ -168,7 +168,13 @@ if not games_df_all.empty:
         if state in ("final", "live", "postponed"):
             return False
         ct = row.get("commence_time")
+        odds_eid = row.get("odds_event_id")
         if ct is None or pd.isna(ct):
+            # No commence_time AND no odds_event_id = TBD placeholder game (NBA
+            # Stats API often returns playoff games pending series advancement
+            # that don't have markets yet). Hide to keep dashboard clean.
+            if not odds_eid or pd.isna(odds_eid):
+                return False
             return True
         try:
             ct_dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
