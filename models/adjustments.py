@@ -11,7 +11,7 @@ Designed for easy A/B removal — comment out one factor, re-fit, see what chang
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, ClassVar
 import pandas as pd
 
 from config import (
@@ -19,6 +19,17 @@ from config import (
     PLAYOFF_STAR_MIN_BOOST,
     PLAYOFF_BENCH_MIN_PENALTY,
 )
+
+
+# Hard cap on the cumulative multiplier. Prevents the runaway-confident
+# picks that surface when 4+ favorable signals all stack (audit 2026-05-02
+# showed 7-15% edge buckets with -54% / -41% realized ROI — exactly the
+# bets where every adjustment was firing in the same direction and
+# independence math overstated joint probability).
+# ±15% is roomy enough that a single strong matchup edge survives, but
+# prevents the 1.05 × 1.10 × 1.10 × 1.08 ≈ 1.37 stacks we were seeing.
+_COMBINED_CAP_LO = 0.85
+_COMBINED_CAP_HI = 1.15
 
 
 @dataclass
@@ -32,6 +43,12 @@ class AdjustmentBreakdown:
 
     @property
     def combined(self) -> float:
+        raw = self.matchup * self.rest * self.playoff * self.injury
+        return max(_COMBINED_CAP_LO, min(_COMBINED_CAP_HI, raw))
+
+    @property
+    def combined_uncapped(self) -> float:
+        """For diagnostics — the would-be multiplier before clamping."""
         return self.matchup * self.rest * self.playoff * self.injury
 
 
