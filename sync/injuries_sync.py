@@ -1,27 +1,29 @@
 """
 sync/injuries_sync.py — NBA injury report.
 
-Source: NBA's official daily PDF injury report is hard to scrape reliably,
-so v1 uses ESPN's public injuries page which mirrors the same data.
+Source: ESPN's public JSON API. The HTML scraper this module used to rely on
+broke when ESPN switched to client-rendered React (the static page no longer
+contains injury rows), so we now hit
+  https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries
+which returns the same data structured by team.
+
 Each injured row includes a `minutes_impact` estimate derived from the
 player's recent minutes — fed into adjustments.injury_multiplier.
 """
 from __future__ import annotations
 import hashlib
-import re
 from datetime import datetime, timezone
 
 import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 
 from config import CURRENT_SEASON
 from utils.db import upsert, fetch
-from utils.helpers import name_to_abbr, normalize_player_name
+from utils.helpers import normalize_player_name
 
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 Chrome/121 Safari/537.36"}
-ESPN_INJ_URL = "https://www.espn.com/nba/injuries"
+_HEADERS = {"User-Agent": "Mozilla/5.0"}
+ESPN_API_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 
 
 def _make_id(*parts) -> str:
@@ -50,19 +52,25 @@ def _normalize_status(s: str) -> str:
 def scrape_espn() -> list[dict]:
     rows = []
     try:
-        r = requests.get(ESPN_INJ_URL, headers=_HEADERS, timeout=20)
+        r = requests.get(ESPN_API_URL, headers=_HEADERS, timeout=20)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "lxml")
-        # ESPN's NBA injuries page renders a table per team
-        for section in soup.select("section.Card.Injuries"):
-            team_h = section.select_one(".Card__Header__Title__Wrapper")
-            team_name = team_h.get_text(strip=True) if team_h else ""
-            team_abbr = name_to_abbr(team_name) if team_name else ""
-            for tr in section.select("tbody > tr"):
-                cells = [td.get_text(" ", strip=True) for td in tr.select("td")]
-                if len(cells) < 4:
+        payload = r.json()
+        for team_block in payload.get("injuries", []):
+            for inj in team_block.get("injuries", []):
+                ath = inj.get("athlete") or {}
+                player = ath.get("displayName") or ""
+                if not player:
                     continue
-                player, _pos, status, comment = cells[0], cells[1], cells[2], cells[3] if len(cells) > 3 else ""
+                # Team abbr lives on the athlete, not on the team_block
+                team_abbr = (ath.get("team") or {}).get("abbreviation") or ""
+                status = inj.get("status") or ""
+                details = inj.get("details") or {}
+                comment = (
+                    inj.get("shortComment")
+                    or inj.get("longComment")
+                    or details.get("type")
+                    or ""
+                )
                 rows.append({
                     "player_name":  player,
                     "team_abbr":    team_abbr,
@@ -70,7 +78,7 @@ def scrape_espn() -> list[dict]:
                     "comment":      comment,
                 })
     except Exception as e:
-        print(f"[injuries] ESPN scrape error: {e}")
+        print(f"[injuries] ESPN API error: {e}")
     return rows
 
 
@@ -109,7 +117,10 @@ def run_injuries_sync() -> None:
         elif status == "day-to-day": dtd_n += 1
         else: q_n += 1
         rows.append({
-            "id":             _make_id(r["player_name"], r["team_abbr"]),
+            # Hash by player only — a player can change teams or have an
+            # earlier sync miss the team_abbr; we want the latest status
+            # to overwrite the prior row, not create a duplicate.
+            "id":             _make_id(r["player_name"]),
             "player_id":      None,
             "player_name":    r["player_name"],
             "team_abbr":      r["team_abbr"],

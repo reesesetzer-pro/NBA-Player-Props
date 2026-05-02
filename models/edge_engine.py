@@ -132,8 +132,23 @@ def calculate_edges_for_game(
     if g_props.empty:
         return edges
 
+    # Build set of player-name-norms ruled out, doubtful, or otherwise
+    # confirmed not playing tonight. The Odds API still returns props for
+    # late scratches (e.g. KD listed Out for the day-of game), so without
+    # this filter the model happily computes edges for players who won't
+    # take the floor.
+    out_norms: set[str] = set()
+    if injuries_df is not None and not injuries_df.empty:
+        bad = injuries_df[injuries_df["status"].isin(["out", "doubtful"])]
+        if not bad.empty:
+            from utils.helpers import normalize_player_name as _norm
+            out_norms = {_norm(n) for n in bad["player_name"].astype(str)}
+
     # Iterate per (player, market_base)
     for (player_norm, market), grp in g_props.groupby(["player_name_norm", "market"]):
+        if player_norm in out_norms:
+            continue
+
         stat_info = MARKET_TO_STAT.get(market)
         if not stat_info:
             continue

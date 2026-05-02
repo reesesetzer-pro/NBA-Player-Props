@@ -220,8 +220,173 @@ with tabs[0]:
             "Min price (American)", -1000, +200, -550, 10, key="tonight_min_price",
             help="Cap how juiced you'll see. Default -550 hides extreme chalk.",
         )
-        st.caption(f"Each game card shows the **top 3 plays** for that game — by your selected metric. "
+        st.caption(f"Top 5 picks across the whole slate, then **each team's top 5** under its game card. "
                    f"Same min-edge floor as Best Bets (4%) and prices ≥ {min_price_tonight:+d}.")
+
+        # ── Helper: render one pick card ────────────────────────────────────
+        def _render_pick(r, indent_px: int = 24):
+            tier_class = "nba-card-strong" if r["edge"] >= EDGE_STRONG_THRESHOLD else "nba-card-soft"
+            tag = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
+            st.markdown(f"""
+            <div class="nba-card {tier_class}" style="margin-left:{indent_px}px; padding:12px 16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                <div style="flex:1; min-width:240px;">
+                  <div style="font-size:14px; font-weight:700; color:#E2E2EE;">
+                    {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
+                  </div>
+                  <div style="font-size:12px; color:#B8B8D4; margin-top:3px;">
+                    {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])}  &nbsp; {tag}
+                  </div>
+                </div>
+                <div style="display:flex; gap:14px; flex-wrap:wrap;">
+                  <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
+                  <div class="stat-block"><div class="stat-label">WIN %</div>
+                    <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div></div>
+                  <div class="stat-block"><div class="stat-label">BEST</div>
+                    <div class="stat-value">{fmt_odds(r['best_price'])}</div>
+                    <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Top 5 picks across the whole slate ──────────────────────────────
+        slate_qualifying = pd.DataFrame()
+        if not edges_df.empty:
+            slate_qualifying = edges_df[
+                (edges_df["edge"] >= EDGE_SOFT_THRESHOLD)
+                & (edges_df["best_price"] >= min_price_tonight)
+            ].copy()
+            if not slate_qualifying.empty:
+                slate_sort_col = "edge" if sort_per_game == "Edge" else "model_prob"
+                slate_top5 = (
+                    slate_qualifying.sort_values(slate_sort_col, ascending=False)
+                    .drop_duplicates(subset=["player_name", "market_base"])
+                    .head(5)
+                )
+                st.markdown(
+                    "<div style='margin:12px 0 4px 0; font-size:16px; font-weight:700; color:#FFD66B;'>"
+                    "🔥 Top 5 Picks Tonight"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                for _, r in slate_top5.iterrows():
+                    _render_pick(r, indent_px=0)
+                st.markdown("")
+
+        # ── Auto Parlays: three tiers, brute-force best combo per band ──────
+        # Pool: one leg per player (highest model_prob), capped at top 20.
+        # No leg-count cap — but we prune any branch whose minimum-possible
+        # combined decimal already exceeds the band's max, which collapses the
+        # search to just the leg counts that can actually fit the band.
+        def _best_parlay_in_band(legs_pool, min_american, max_american):
+            # American → decimal max for early-stop pruning
+            max_decimal = (
+                (max_american / 100.0) + 1.0 if max_american > 0
+                else (100.0 / abs(max_american)) + 1.0
+            )
+            # Sort ascending by decimal so we know the floor of combined decimal
+            sorted_pool = sorted(
+                legs_pool,
+                key=lambda L: ((L.price / 100.0) + 1.0 if L.price > 0
+                               else (100.0 / abs(L.price)) + 1.0),
+            )
+            decimals = [
+                (L.price / 100.0) + 1.0 if L.price > 0 else (100.0 / abs(L.price)) + 1.0
+                for L in sorted_pool
+            ]
+
+            best = None
+            n = 2
+            while n <= len(sorted_pool):
+                # Floor of combined decimal at this n = product of n smallest
+                floor = 1.0
+                for d in decimals[:n]:
+                    floor *= d
+                if floor > max_decimal:
+                    break  # any larger n will only overshoot further
+                for combo in combinations(sorted_pool, n):
+                    if len({L.player_name.lower() for L in combo}) != n:
+                        continue
+                    try:
+                        p = build_parlay(list(combo))
+                    except Exception:
+                        continue
+                    if not (min_american <= p.american_odds <= max_american):
+                        continue
+                    if best is None or p.adjusted_prob > best.adjusted_prob:
+                        best = p
+                n += 1
+            return best
+
+        if not slate_qualifying.empty:
+            pool_df = (
+                slate_qualifying.sort_values("model_prob", ascending=False)
+                .drop_duplicates(subset=["player_name"])
+                .head(20)
+            )
+            leg_pool: list[Leg] = []
+            for _, r in pool_df.iterrows():
+                leg_pool.append(Leg(
+                    player_name = str(r["player_name"]),
+                    team_abbr   = str(r.get("team_abbr") or ""),
+                    market_base = str(r.get("market_base") or ""),
+                    line        = float(r["line"]),
+                    over_under  = str(r["over_under"]),
+                    price       = int(r["best_price"]),
+                    model_prob  = float(r["model_prob"]),
+                    game_id     = str(r["game_id"]),
+                    book        = str(r["best_book"]),
+                ))
+
+            tiers = [
+                ("🟢 Safer  (≥ -130)",  -130,   99, "Most-likely combo whose parlay still pays at least -130."),
+                ("🟡 Medium (≤ +200)",  100,  200, "Most-likely parlay capped at +200."),
+                ("🔴 Longer (≤ +300)",  201,  300, "Most-likely parlay stretching out to +300."),
+            ]
+
+            parlays = []
+            for label, lo, hi, blurb in tiers:
+                p = _best_parlay_in_band(leg_pool, lo, hi)
+                if p is not None:
+                    parlays.append((label, blurb, p))
+
+            if parlays:
+                st.markdown(
+                    "<div style='margin:18px 0 4px 0; font-size:16px; font-weight:700; color:#FFD66B;'>"
+                    "🎰 Auto Parlays"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                for label, blurb, p in parlays:
+                    legs_html = "".join([
+                        f"<div style='font-size:12px; color:#B8B8D4; margin:2px 0;'>"
+                        f"&nbsp;&nbsp;• <strong>{L.player_name}</strong> "
+                        f"<span style='color:#888'>({L.team_abbr})</span> &mdash; "
+                        f"{L.over_under} <strong>{L.line}</strong> {_market_label(L.market_base)} "
+                        f"@ {fmt_odds(L.price)} <span style='color:#666'>({_book_short(L.book)})</span>"
+                        f"</div>"
+                        for L in p.legs
+                    ])
+                    st.markdown(f"""
+                    <div class="nba-card" style="margin:6px 0; padding:14px 16px;">
+                      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap;">
+                        <div style="flex:1; min-width:280px;">
+                          <div style="font-size:13px; font-weight:700; color:#FFD66B; margin-bottom:6px;">{label}</div>
+                          {legs_html}
+                          <div style="font-size:11px; color:#777; margin-top:6px;">{blurb}</div>
+                        </div>
+                        <div style="display:flex; gap:14px; flex-wrap:wrap;">
+                          <div class="stat-block"><div class="stat-label">PARLAY</div>
+                            <div class="stat-value">{fmt_odds(p.american_odds)}</div></div>
+                          <div class="stat-block"><div class="stat-label">HIT %</div>
+                            <div class="stat-value" style="color:#00D4FF;">{p.adjusted_prob*100:.1f}%</div></div>
+                          <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(p.edge)}</div>
+                        </div>
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown("")
 
         for _, g in games_df.iterrows():
             game_edges = edges_df[edges_df["game_id"] == g["id"]] if not edges_df.empty else pd.DataFrame()
@@ -254,7 +419,7 @@ with tabs[0]:
             </div>
             """, unsafe_allow_html=True)
 
-            # Top 3 plays for this game
+            # Each team's top 5 plays for this game
             if game_edges.empty:
                 st.caption("  · no edges priced for this game yet")
                 st.markdown("")
@@ -268,32 +433,33 @@ with tabs[0]:
                 st.markdown("")
                 continue
             sort_col = "edge" if sort_per_game == "Edge" else "model_prob"
-            top3 = qualifying.sort_values(sort_col, ascending=False).head(3)
-            for _, r in top3.iterrows():
-                tier_class = "nba-card-strong" if r["edge"] >= EDGE_STRONG_THRESHOLD else "nba-card-soft"
-                tag = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
-                st.markdown(f"""
-                <div class="nba-card {tier_class}" style="margin-left:24px; padding:12px 16px;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-                    <div style="flex:1; min-width:240px;">
-                      <div style="font-size:14px; font-weight:700; color:#E2E2EE;">
-                        {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
-                      </div>
-                      <div style="font-size:12px; color:#B8B8D4; margin-top:3px;">
-                        {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])}  &nbsp; {tag}
-                      </div>
-                    </div>
-                    <div style="display:flex; gap:14px; flex-wrap:wrap;">
-                      <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
-                      <div class="stat-block"><div class="stat-label">WIN %</div>
-                        <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div></div>
-                      <div class="stat-block"><div class="stat-label">BEST</div>
-                        <div class="stat-value">{fmt_odds(r['best_price'])}</div>
-                        <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
-                    </div>
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
+
+            for team_abbr, team_label in (
+                (g["away_abbr"], g.get("away_team", g["away_abbr"])),
+                (g["home_abbr"], g.get("home_team", g["home_abbr"])),
+            ):
+                team_picks = (
+                    qualifying[qualifying["team_abbr"] == team_abbr]
+                    .sort_values(sort_col, ascending=False)
+                    .drop_duplicates(subset=["player_name", "market_base"])
+                    .head(5)
+                )
+                st.markdown(
+                    f"<div style='margin:8px 0 2px 12px; font-size:13px; font-weight:600; "
+                    f"color:#9DB4FF; letter-spacing:0.5px;'>"
+                    f"📊 {team_abbr} — Top 5"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if team_picks.empty:
+                    st.markdown(
+                        "<div style='margin-left:24px; color:#666688; font-size:12px;'>"
+                        "no qualifying plays for this team</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    for _, r in team_picks.iterrows():
+                        _render_pick(r, indent_px=24)
             st.markdown("")  # spacer between games
 
 
