@@ -12,49 +12,17 @@ Approach:
 """
 from __future__ import annotations
 import hashlib
-import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
-from nba_api.stats.endpoints import commonplayerinfo
 
 from config import CURRENT_SEASON, POSITION_GROUPS
 from utils.db import upsert, fetch_all
+from utils.positions import get_position as _get_position
 
 
 def _make_id(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
-
-
-def _normalize_position(pos: str) -> str:
-    """commonplayerinfo returns things like 'G', 'F', 'C', 'G-F', 'F-C'.
-    Map to our 5-position framework, defaulting to first listed."""
-    pos = (pos or "").upper().strip()
-    if not pos:
-        return "SF"
-    primary = pos.split("-")[0].strip()
-    return {
-        "G": "PG", "PG": "PG", "SG": "SG",
-        "F": "SF", "SF": "SF", "PF": "PF",
-        "C": "C",
-    }.get(primary, "SF")
-
-
-_position_cache: dict[int, str] = {}
-
-
-def _get_position(player_id: int) -> str:
-    if player_id in _position_cache:
-        return _position_cache[player_id]
-    try:
-        df = commonplayerinfo.CommonPlayerInfo(player_id=player_id).get_data_frames()[0]
-        pos = _normalize_position(str(df.iloc[0].get("POSITION", "")))
-        _position_cache[player_id] = pos
-        time.sleep(0.6)                                  # rate-limit gentle
-        return pos
-    except Exception:
-        return "SF"
 
 
 def run_pos_def_sync(season: str = CURRENT_SEASON, season_type: str = "regular") -> None:

@@ -97,7 +97,23 @@ def load_games(target_date: str) -> pd.DataFrame:
 def load_edges_for(game_ids: tuple[str, ...]) -> pd.DataFrame:
     if not game_ids:
         return pd.DataFrame()
-    return fetch_in("nba_prop_edges", "game_id", list(game_ids))
+    df = fetch_in("nba_prop_edges", "game_id", list(game_ids))
+    if df.empty:
+        return df
+    # Layer in per-market confidence (historical ROI on settled shadow picks).
+    # `confidence_edge = edge × market_confidence` is a rank metric — markets
+    # that have proven profitable get prioritized; underperformers shrink.
+    # Probabilities are NOT modified (transparency); Kelly was already scaled
+    # at edge_engine time so we re-derive `confidence_edge` only here.
+    try:
+        from models.calibration import load_market_confidence
+        conf_map = load_market_confidence()
+        df["market_confidence"] = df["market_base"].map(conf_map).fillna(1.0)
+        df["confidence_edge"]   = (df["edge"] * df["market_confidence"]).round(4)
+    except Exception:
+        df["market_confidence"] = 1.0
+        df["confidence_edge"]   = df["edge"]
+    return df
 
 
 def _market_label(base: str) -> str:
@@ -151,7 +167,8 @@ selected_books = [_BOOK_PRETTY_TO_KEY[b] for b in book_choice_pretty] or list(_B
 st.markdown("<hr style='margin:8px 0 16px 0; border:none; border-top:1px solid #1E1E30;' />",
             unsafe_allow_html=True)
 
-tabs = st.tabs(["Tonight", "⭐ Best Bets", "🎯 Alt Line Builder", "🪜 Player Intel", "📓 Bet Journal"])
+tabs = st.tabs(["🎯 MUST TAKE", "Tonight", "⭐ Best Bets", "🎰 +400 Longshots",
+                "🚀 +500 Moonshots", "🎯 Alt Line Builder", "🪜 Player Intel", "📓 Bet Journal"])
 
 
 # Pre-load shared data
@@ -200,8 +217,115 @@ else:
     edges_df = edges_df_all
 
 
-# ── TAB 1 — Tonight ───────────────────────────────────────────────────────────
+# ── TAB 0 — 🎯 MUST TAKE ──────────────────────────────────────────────────────
 with tabs[0]:
+    st.markdown("### 🎯 Must Take — tonight's high-conviction plays")
+    st.caption("Picks that pass every filter we trust: enabled markets only, "
+               "calibrated win% ≥ 60%, raw edge ≥ 6%, market confidence ≥ 1.05 "
+               "(historical ROI proven), and at most one pick per player to avoid "
+               "concentration risk.")
+
+    if edges_df.empty:
+        st.info("No edges yet — run odds_sync + edge_engine first.")
+    else:
+        # Strict filters — only the highest-conviction plays survive
+        MUST_MIN_PROB        = 0.60   # ignore longshot variance
+        MUST_MIN_EDGE        = 0.06   # raw edge floor
+        MUST_MIN_CONFIDENCE  = 1.05   # market historical ROI factor
+        MUST_MAX_PICKS       = 8      # don't overload — quality over quantity
+        MUST_MAX_PER_PLAYER  = 1      # no doubling up on one guy
+
+        candidates = edges_df[
+            (edges_df["model_prob"] >= MUST_MIN_PROB)
+            & (edges_df["edge"] >= MUST_MIN_EDGE)
+            & (edges_df["market_confidence"] >= MUST_MIN_CONFIDENCE)
+        ].copy()
+
+        if candidates.empty:
+            st.warning(
+                f"⚠️ Zero picks pass the Must-Take filter tonight. Either the slate "
+                f"is thin, or the model isn't producing high-conviction plays in "
+                f"proven markets. Don't force action — sit it out and check the "
+                f"other tabs for softer opportunities."
+            )
+        else:
+            # Rank by confidence-adjusted edge, then dedupe to one-per-player
+            candidates = candidates.sort_values("confidence_edge", ascending=False)
+            seen_players = set()
+            picks = []
+            for _, r in candidates.iterrows():
+                if r["player_name"] in seen_players:
+                    continue
+                seen_players.add(r["player_name"])
+                picks.append(r)
+                if len(picks) >= MUST_MAX_PICKS:
+                    break
+
+            # Headline summary
+            total_kelly = sum(p.get("kelly_quarter", 0) or 0 for p in picks)
+            st.markdown(f"""
+            <div class="nba-card nba-card-hammer">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+                <div>
+                  <span class="tag-hammer">🔨 {len(picks)} PLAYS · QTR-KELLY ${total_kelly:.0f}</span>
+                  <div style="font-size:18px; font-weight:700; margin-top:8px; color:#E2E2EE;">
+                    Tonight's high-conviction slate
+                  </div>
+                  <div style="font-size:12px; color:#888; margin-top:3px;">
+                    Filters: prob ≥{MUST_MIN_PROB*100:.0f}% · edge ≥{MUST_MIN_EDGE*100:.0f}% ·
+                    market_conf ≥{MUST_MIN_CONFIDENCE} · max {MUST_MAX_PICKS} picks · ≤1 per player
+                  </div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Render each pick as a clean card
+            for r in picks:
+                conf = float(r.get("market_confidence", 1.0))
+                conf_tag = ("🔥 PROVEN" if conf >= 1.20 else
+                            "✓ STRONG" if conf >= 1.10 else
+                            "✓ OK")
+                tag_alt = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
+
+                st.markdown(f"""
+                <div class="nba-card nba-card-strong">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+                    <div style="flex:1; min-width:280px;">
+                      <div style="font-size:16px; font-weight:800; color:#E2E2EE;">
+                        {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
+                      </div>
+                      <div style="font-size:14px; color:#B8B8D4; margin-top:4px;">
+                        {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])}
+                        &nbsp; {tag_alt}
+                        &nbsp; <span style="color:#00FF88;font-size:11px;font-weight:700;">{conf_tag} ({conf:.2f}x)</span>
+                      </div>
+                    </div>
+                    <div style="display:flex; gap:18px; flex-wrap:wrap;">
+                      <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
+                      <div class="stat-block"><div class="stat-label">WIN %</div>
+                        <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">PRICE</div>
+                        <div class="stat-value">{fmt_odds(r['best_price'])}</div>
+                        <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
+                      <div class="stat-block"><div class="stat-label">¼ KELLY</div>
+                        <div class="stat-value" style="color:#00FF88;">${r['kelly_quarter']:.0f}</div></div>
+                    </div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.divider()
+            st.caption(
+                "💡 ¼ Kelly is the recommended sizing — these are confidence-weighted "
+                "stakes already. Risk-of-ruin is lower than full Kelly while still "
+                "scaling with edge magnitude. **Don't add markets we've cut** "
+                "(ast / reb) even if you see them elsewhere on the slate."
+            )
+
+
+# ── TAB 1 — Tonight ───────────────────────────────────────────────────────────
+with tabs[1]:
     if games_df.empty:
         if n_started:
             st.info(f"All {n_started} of today's games have already started — no pre-game opportunities left. Check back tomorrow.")
@@ -464,7 +588,7 @@ with tabs[0]:
 
 
 # ── TAB 2 — Best Bets ─────────────────────────────────────────────────────────
-with tabs[1]:
+with tabs[2]:
     if edges_df.empty:
         st.info("No edges yet — run odds_sync + edge_engine first.")
     else:
@@ -476,7 +600,7 @@ with tabs[1]:
             "Markets", ["pts", "reb", "ast", "pra", "fg3m", "blk", "stl"],
             default=["pts", "reb", "ast", "pra"],
         )
-        sort_by = c4.selectbox("Sort by", ["Edge", "Win %", "Kelly $"])
+        sort_by = c4.selectbox("Sort by", ["Confidence-Adj Edge", "Edge", "Win %", "Kelly $"])
 
         view = edges_df[
             (edges_df["edge"] >= min_edge)
@@ -484,9 +608,14 @@ with tabs[1]:
             & (edges_df["market_base"].isin(market_filter))
         ].copy()
 
-        if sort_by == "Edge":      view = view.sort_values("edge", ascending=False)
-        elif sort_by == "Win %":   view = view.sort_values("model_prob", ascending=False)
-        else:                      view = view.sort_values("kelly_half", ascending=False)
+        if sort_by == "Confidence-Adj Edge":
+            view = view.sort_values("confidence_edge", ascending=False)
+        elif sort_by == "Edge":
+            view = view.sort_values("edge", ascending=False)
+        elif sort_by == "Win %":
+            view = view.sort_values("model_prob", ascending=False)
+        else:
+            view = view.sort_values("kelly_half", ascending=False)
 
         st.markdown(f"**{len(view)} edges meeting filter · {(view['edge']>=EDGE_STRONG_THRESHOLD).sum()} strong (≥7%)**")
 
@@ -550,8 +679,104 @@ with tabs[1]:
             """, unsafe_allow_html=True)
 
 
-# ── TAB 3 — 🎯 Alt Line Builder (the new centerpiece) ─────────────────────────
-with tabs[2]:
+# ── TAB 3 — 🎰 +400 Longshots ─────────────────────────────────────────────────
+def _render_longshot_tab(min_price: int, label: str, threshold_text: str):
+    """Filter edges to picks priced at or above min_price (American odds)."""
+    if edges_df.empty:
+        st.info("No edges yet — run odds_sync + edge_engine first.")
+        return
+
+    st.markdown(f"### {label}")
+    st.caption(threshold_text)
+
+    c1, c2, c3 = st.columns([1, 1.3, 1])
+    min_edge = c1.slider("Min edge", -0.10, 0.50, 0.04, 0.01,
+                         format="%.2f", key=f"ls_edge_{min_price}")
+    market_filter = c2.multiselect(
+        "Markets", ["pts", "reb", "ast", "pra", "fg3m", "blk", "stl"],
+        default=["pts", "reb", "ast", "pra", "fg3m"],
+        key=f"ls_mkts_{min_price}",
+    )
+    sort_by = c3.selectbox("Sort by", ["Edge", "Win %", "Best Price"],
+                           key=f"ls_sort_{min_price}")
+
+    view = edges_df[
+        (edges_df["best_price"] >= min_price)
+        & (edges_df["edge"] >= min_edge)
+        & (edges_df["market_base"].isin(market_filter))
+    ].copy()
+
+    if sort_by == "Edge":         view = view.sort_values("edge", ascending=False)
+    elif sort_by == "Win %":      view = view.sort_values("model_prob", ascending=False)
+    else:                         view = view.sort_values("best_price", ascending=False)
+
+    st.markdown(f"**{len(view)} picks ≥ {min_price:+d}** "
+                f"· {(view['edge']>=0.10).sum()} with ≥10% edge "
+                f"· {(view['is_alt']==True).sum()} alt lines")
+
+    # Calibration warning — longshots are where model overshoot bites hardest
+    st.warning(
+        "⚠️ **Longshot caveat:** at +400 / +500 odds, the implied probability is "
+        "≤20% / 17%. Model overshoots — even after calibration — can manufacture "
+        "fake edges in this zone. Cross-check against teammate-out / Game-7 / "
+        "matchup signals before sizing up.",
+        icon="🚨",
+    )
+
+    if view.empty:
+        st.info("No picks meeting filters at this odds threshold.")
+        return
+
+    for _, r in view.head(40).iterrows():
+        tier_class = "nba-card-strong" if r["edge"] >= 0.10 else "nba-card-soft"
+        tag = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
+        # Implied % for context
+        ml = float(r["best_price"])
+        implied = (100/(ml+100) if ml > 0 else abs(ml)/(abs(ml)+100)) * 100
+        st.markdown(f"""
+        <div class="nba-card {tier_class}">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
+            <div style="flex:1; min-width:260px;">
+              <div style="font-size:15px; font-weight:700; color:#E2E2EE;">
+                {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
+              </div>
+              <div style="font-size:13px; color:#B8B8D4; margin-top:3px;">
+                {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])} &nbsp; {tag}
+              </div>
+            </div>
+            <div style="display:flex; gap:18px; flex-wrap:wrap;">
+              <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
+              <div class="stat-block"><div class="stat-label">WIN %</div>
+                <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div>
+                <div class="stat-sub">implied {implied:.1f}%</div></div>
+              <div class="stat-block"><div class="stat-label">PRICE</div>
+                <div class="stat-value" style="font-size:18px;">{fmt_odds(r['best_price'])}</div>
+                <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
+              <div class="stat-block"><div class="stat-label">KELLY ¼</div>
+                <div class="stat-value" style="color:#00FF88;">${r['kelly_quarter']:.0f}</div></div>
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+with tabs[3]:
+    _render_longshot_tab(
+        min_price=400, label="🎰 +400 Longshots",
+        threshold_text="Picks priced at +400 or higher (≤20% implied). "
+                       "Quarter-Kelly suggested — variance is brutal in this zone.",
+    )
+
+# ── TAB 4 — 🚀 +500 Moonshots ─────────────────────────────────────────────────
+with tabs[4]:
+    _render_longshot_tab(
+        min_price=500, label="🚀 +500 Moonshots",
+        threshold_text="Picks priced at +500 or higher (≤17% implied). "
+                       "Hit rate is low even when right; size for survival, not cashout.",
+    )
+
+# ── TAB 5 — 🎯 Alt Line Builder ──────────────────────────────────────────────
+with tabs[5]:
     st.markdown("""
     <div style="margin-bottom:18px;">
       <div style="font-size:18px; font-weight:700; color:#E2E2EE;">
@@ -1007,8 +1232,8 @@ with tabs[2]:
                     st.caption("Adjustments: " + " · ".join(pp.notes))
 
 
-# ── TAB 4 — 🪜 Player Intel (alt ladder for one player) ───────────────────────
-with tabs[3]:
+# ── TAB 6 — 🪜 Player Intel (alt ladder for one player) ───────────────────────
+with tabs[6]:
     if edges_df.empty:
         st.info("Run sync first.")
     else:
@@ -1050,8 +1275,8 @@ with tabs[3]:
             )
 
 
-# ── TAB 5 — 📓 Bet Journal ────────────────────────────────────────────────────
-with tabs[4]:
+# ── TAB 7 — 📓 Bet Journal ────────────────────────────────────────────────────
+with tabs[7]:
     bets = fetch("nba_bets", limit=500)
     if bets.empty:
         st.info("No bets logged yet.")

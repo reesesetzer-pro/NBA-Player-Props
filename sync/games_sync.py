@@ -80,6 +80,74 @@ def fetch_today_games(today: Optional[date] = None) -> list[dict]:
     return sb.to_dict(orient="records")
 
 
+def fetch_today_games_espn(today: Optional[date] = None) -> list[dict]:
+    """Fallback when NBA Stats API hasn't published the day's schedule yet.
+
+    Round-2 schedule typically lags 12-24h after round 1 ends — round 1
+    finished on 2026-05-03 (DET-ORL Game 7) and the NBA scoreboardv2
+    endpoint had no games for 2026-05-04 even though ESPN already listed
+    PHI@NY and MIN@SA. Fetch from ESPN and return scoreboardv2-shaped rows
+    so the rest of the sync code is unchanged.
+    """
+    import requests
+    today = today or date.today()
+    try:
+        r = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+            params={"dates": today.strftime("%Y%m%d")},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[games] ESPN fallback failed: {e}")
+        return []
+
+    # Map ESPN abbr → NBA Stats team_id (same table our pos_def cache uses).
+    # ESPN uses 2-3 letter abbreviations; some differ from NBA Stats:
+    #   ESPN "NY" → NBA "NYK", "SA" → "SAS", "GS" → "GSW", "NO" → "NOP",
+    #   "UTAH" → "UTA". Normalize before lookup.
+    from config import TEAM_ABBR_TO_ID
+    _ESPN_TO_NBA = {"NY": "NYK", "SA": "SAS", "GS": "GSW", "NO": "NOP", "UTAH": "UTA"}
+    rows = []
+    for e in data.get("events", []):
+        comps = e.get("competitions", []) or []
+        if not comps:
+            continue
+        comp = comps[0]
+        # ESPN's event id isn't the NBA stats game_id — synthesize one with
+        # the playoff prefix so downstream `gid.startswith("004")` works.
+        gid_raw = str(e.get("id", ""))
+        gid = f"00420{gid_raw[-5:]}" if gid_raw else f"esp{today.strftime('%y%m%d')}{len(rows):02d}"
+
+        home = away = None
+        for c in comp.get("competitors", []) or []:
+            t = c.get("team", {}) or {}
+            abbr_espn = t.get("abbreviation", "")
+            abbr      = _ESPN_TO_NBA.get(abbr_espn, abbr_espn)
+            tid       = TEAM_ABBR_TO_ID.get(abbr, 0)
+            if c.get("homeAway") == "home":
+                home = (tid, abbr)
+            else:
+                away = (tid, abbr)
+        if not home or not away:
+            continue
+
+        # Status text from ESPN is e.g. "Mon, May 4th at 8:00 PM EDT"
+        status = comp.get("status", {}).get("type", {}) or {}
+        rows.append({
+            "GAME_ID":          gid,
+            "HOME_TEAM_ID":     home[0],
+            "VISITOR_TEAM_ID":  away[0],
+            "GAME_STATUS_TEXT": status.get("shortDetail", "") or status.get("detail", ""),
+            "GAME_STATUS_ID":   1,                # 1 = scheduled
+            # Stash abbr directly so the abbr-lookup loop has a fallback path
+            "_HOME_ABBR_ESPN":  home[1],
+            "_AWAY_ABBR_ESPN":  away[1],
+        })
+    return rows
+
+
 def _team_abbr_from_id(team_id: int, ref: dict) -> str:
     return ref.get(int(team_id), "")
 
@@ -89,8 +157,13 @@ def run_games_sync(target_date: Optional[date] = None) -> None:
     target_date = target_date or date.today()
     print(f"[games] Building schedule for {target_date.isoformat()}...")
 
-    # 1. Today's games
+    # 1. Today's games — try NBA Stats first, fall back to ESPN.
+    # NBA Stats lags ~12-24h after a round ends before publishing the next
+    # round's schedule. ESPN has it earlier.
     today_rows = fetch_today_games(target_date)
+    if not today_rows:
+        print("[games] NBA Stats has no games for today — trying ESPN fallback...")
+        today_rows = fetch_today_games_espn(target_date)
     if not today_rows:
         print("[games] No games today.")
         return
@@ -112,8 +185,10 @@ def run_games_sync(target_date: Optional[date] = None) -> None:
         gid       = str(g.get("GAME_ID", ""))
         home_id   = int(g.get("HOME_TEAM_ID", 0) or 0)
         away_id   = int(g.get("VISITOR_TEAM_ID", 0) or 0)
-        home_abbr = id_to_abbr.get(home_id, "")
-        away_abbr = id_to_abbr.get(away_id, "")
+        # Prefer the schedule-derived abbr; fall back to ESPN-stashed abbr
+        # when this row came from the ESPN fallback path.
+        home_abbr = id_to_abbr.get(home_id, "") or g.get("_HOME_ABBR_ESPN", "")
+        away_abbr = id_to_abbr.get(away_id, "") or g.get("_AWAY_ABBR_ESPN", "")
 
         h_last = _last_game_date(schedule, home_abbr, target_date) if home_abbr else None
         a_last = _last_game_date(schedule, away_abbr, target_date) if away_abbr else None

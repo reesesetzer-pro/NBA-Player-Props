@@ -109,6 +109,12 @@ EDGE_STRONG_THRESHOLD = 0.07   # 7% — auto-flagged
 MIN_MODEL_PROB        = 0.55   # don't suggest a leg below this win %
 PARLAY_MAX_LEGS       = 5
 
+# Alt-ladder one-side vig assumption. Books post Over-only deep tails and we
+# need to strip an assumed hold to estimate true price. 10% is a realistic
+# midpoint for DK/FD long-tail props (5-15% typical, 20%+ on the deepest tails).
+# Conservative bias: underestimating vig understates real edge.
+ALT_LADDER_VIG_DEFAULT = 0.10
+
 
 # ── Distribution fitting ──────────────────────────────────────────────────────
 DIST_ROLLING_WINDOW = 15        # last N games for recent-form mean
@@ -132,6 +138,17 @@ PLAYOFF_SERIES_FATIGUE_PENALTY = 0.03   # 3% scoring drop after 6+ game series
 PLAYOFF_STAR_MIN_BOOST         = 0.10   # 10% mean boost for stars (≥30 mpg)
 PLAYOFF_BENCH_MIN_PENALTY      = 0.30   # 30% mean penalty for bench (<18 mpg)
 
+# Game 7 / elimination — stack on TOP of base playoff multiplier.
+# Empirical NBA Game 7 effects (rotations contract from 9-10 to 7-8):
+#   Stars (≥30 mpg) play even more (less rest, fewer subs)
+#   Bench (<18 mpg) often glued to the floor — 7th-9th men barely play
+#   Mid-rotation: roughly neutral
+PLAYOFF_GAME7_STAR_BOOST          = 0.05   # +5% additional on top of star_min_boost
+PLAYOFF_GAME7_BENCH_PENALTY       = 0.10   # +10pp additional bench penalty
+# Elimination game (one team at 3 wins, not 3-3) — same direction, smaller magnitude
+PLAYOFF_ELIM_STAR_BOOST           = 0.03
+PLAYOFF_ELIM_BENCH_PENALTY        = 0.05
+
 
 # ── NBA team metadata ─────────────────────────────────────────────────────────
 NBA_TEAMS = {
@@ -147,3 +164,19 @@ NBA_TEAMS = {
     "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
 }
 TEAM_NAME_TO_ABBR = {v: k for k, v in NBA_TEAMS.items()}
+
+# NBA Stats team_id → abbreviation (used to translate playoff_series rows
+# whose `team1_abbr`/`team2_abbr` columns actually store team IDs).
+TEAM_ID_TO_ABBR = {
+    1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN",
+    1610612766: "CHA", 1610612741: "CHI", 1610612739: "CLE",
+    1610612742: "DAL", 1610612743: "DEN", 1610612765: "DET",
+    1610612744: "GSW", 1610612745: "HOU", 1610612754: "IND",
+    1610612746: "LAC", 1610612747: "LAL", 1610612763: "MEM",
+    1610612748: "MIA", 1610612749: "MIL", 1610612750: "MIN",
+    1610612740: "NOP", 1610612752: "NYK", 1610612760: "OKC",
+    1610612753: "ORL", 1610612755: "PHI", 1610612756: "PHX",
+    1610612757: "POR", 1610612758: "SAC", 1610612759: "SAS",
+    1610612761: "TOR", 1610612762: "UTA", 1610612764: "WAS",
+}
+TEAM_ABBR_TO_ID = {v: k for k, v in TEAM_ID_TO_ABBR.items()}

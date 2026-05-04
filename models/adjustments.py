@@ -18,6 +18,10 @@ from config import (
     PLAYOFF_SERIES_FATIGUE_PENALTY,
     PLAYOFF_STAR_MIN_BOOST,
     PLAYOFF_BENCH_MIN_PENALTY,
+    PLAYOFF_GAME7_STAR_BOOST,
+    PLAYOFF_GAME7_BENCH_PENALTY,
+    PLAYOFF_ELIM_STAR_BOOST,
+    PLAYOFF_ELIM_BENCH_PENALTY,
 )
 
 
@@ -115,28 +119,48 @@ def playoff_multiplier(
     is_playoff: bool,
     minutes_per_game: Optional[float],
     series_fatigue: float = 0.0,           # 0.0 (fresh) → 1.0 (just played 7 games)
+    is_game7: bool = False,
+    is_elimination: bool = False,          # one team at 3-X (not 3-3 = game 7)
 ) -> tuple[float, str]:
     """Playoff context shifts the stat distribution materially:
       - Stars (≥30 mpg) play even more — boost μ
       - Bench (<18 mpg) plays much less or not at all — heavy penalty
       - Mid-rotation roughly neutral
       - Series fatigue applied multiplicatively at end
+      - Game 7 / elimination layer: rotations contract further (stars play
+        bigger minutes, 7th-9th men barely see the floor). Game 7 is the
+        most extreme; elimination games are a smaller version of the same
+        effect.
     """
     if not is_playoff:
         return 1.0, "regular season"
+
+    # Resolve the Game 7 / elimination escalation factors
+    if is_game7:
+        star_extra  = PLAYOFF_GAME7_STAR_BOOST
+        bench_extra = PLAYOFF_GAME7_BENCH_PENALTY
+        ctx_tag     = "game 7"
+    elif is_elimination:
+        star_extra  = PLAYOFF_ELIM_STAR_BOOST
+        bench_extra = PLAYOFF_ELIM_BENCH_PENALTY
+        ctx_tag     = "elimination"
+    else:
+        star_extra  = 0.0
+        bench_extra = 0.0
+        ctx_tag     = ""
 
     if minutes_per_game is None:
         base = 1.0
         note = "playoff (mpg unknown)"
     elif minutes_per_game >= 30:
-        base = 1.0 + PLAYOFF_STAR_MIN_BOOST
-        note = "playoff star (≥30 mpg)"
+        base = 1.0 + PLAYOFF_STAR_MIN_BOOST + star_extra
+        note = f"playoff star (≥30 mpg{', ' + ctx_tag if ctx_tag else ''})"
     elif minutes_per_game < 18:
-        base = 1.0 - PLAYOFF_BENCH_MIN_PENALTY
-        note = "playoff bench (<18 mpg)"
+        base = 1.0 - PLAYOFF_BENCH_MIN_PENALTY - bench_extra
+        note = f"playoff bench (<18 mpg{', ' + ctx_tag if ctx_tag else ''})"
     else:
         base = 1.0
-        note = "playoff rotation"
+        note = f"playoff rotation{' (' + ctx_tag + ')' if ctx_tag else ''}"
 
     fatigue_mult = 1.0 - PLAYOFF_SERIES_FATIGUE_PENALTY * series_fatigue
     if series_fatigue > 0:
@@ -201,6 +225,8 @@ def compose(
     is_playoff: bool,
     minutes_per_game: Optional[float],
     series_fatigue: float = 0.0,
+    is_game7: bool = False,
+    is_elimination: bool = False,
     team_abbr: str,
     player_id: int,
 ) -> AdjustmentBreakdown:
@@ -208,7 +234,10 @@ def compose(
     out = AdjustmentBreakdown()
     out.matchup, m_note = matchup_multiplier(pos_def_df, opponent_abbr, player_position, stat)
     out.rest, r_note    = rest_multiplier(days_rest)
-    out.playoff, p_note = playoff_multiplier(is_playoff, minutes_per_game, series_fatigue)
+    out.playoff, p_note = playoff_multiplier(
+        is_playoff, minutes_per_game, series_fatigue,
+        is_game7=is_game7, is_elimination=is_elimination,
+    )
     out.injury, i_note  = injury_multiplier(injuries_df, team_abbr, player_id)
     out.notes = [m_note, r_note, p_note, i_note]
     return out
