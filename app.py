@@ -219,108 +219,113 @@ else:
 
 # ── TAB 0 — 🎯 MUST TAKE ──────────────────────────────────────────────────────
 with tabs[0]:
-    st.markdown("### 🎯 Must Take — tonight's high-conviction plays")
-    st.caption("Picks that pass every filter we trust: enabled markets only, "
-               "calibrated win% ≥ 60%, raw edge ≥ 6%, market confidence ≥ 1.05 "
-               "(historical ROI proven), and at most one pick per player to avoid "
-               "concentration risk.")
+    st.markdown("## 🎯 Must Take")
+    st.caption("Tiered by win-probability conviction. Same filters across tiers: "
+               "enabled markets only, edge ≥ 6%, market confidence ≥ 1.05, ≤1 pick "
+               "per player. Empty list = sit it out.")
 
     if edges_df.empty:
         st.info("No edges yet — run odds_sync + edge_engine first.")
     else:
-        # Strict filters — only the highest-conviction plays survive
-        MUST_MIN_PROB        = 0.60   # ignore longshot variance
-        MUST_MIN_EDGE        = 0.06   # raw edge floor
-        MUST_MIN_CONFIDENCE  = 1.05   # market historical ROI factor
-        MUST_MAX_PICKS       = 8      # don't overload — quality over quantity
-        MUST_MAX_PER_PLAYER  = 1      # no doubling up on one guy
+        MUST_MIN_PROB       = 0.60
+        MUST_MIN_EDGE       = 0.06
+        MUST_MIN_CONFIDENCE = 1.05
 
         candidates = edges_df[
-            (edges_df["model_prob"] >= MUST_MIN_PROB)
-            & (edges_df["edge"] >= MUST_MIN_EDGE)
+            (edges_df["model_prob"]        >= MUST_MIN_PROB)
+            & (edges_df["edge"]            >= MUST_MIN_EDGE)
             & (edges_df["market_confidence"] >= MUST_MIN_CONFIDENCE)
-        ].copy()
+        ].copy().sort_values("confidence_edge", ascending=False)
 
-        if candidates.empty:
+        # Dedupe one pick per player slate-wide
+        seen = set(); picks_all = []
+        for _, r in candidates.iterrows():
+            if r["player_name"] in seen:
+                continue
+            seen.add(r["player_name"])
+            picks_all.append(r)
+
+        if not picks_all:
             st.warning(
-                f"⚠️ Zero picks pass the Must-Take filter tonight. Either the slate "
-                f"is thin, or the model isn't producing high-conviction plays in "
-                f"proven markets. Don't force action — sit it out and check the "
-                f"other tabs for softer opportunities."
+                "⚠️ Zero picks pass the Must-Take filter tonight. **Sit it out** — "
+                "don't force action. Other tabs have softer plays at your own risk."
             )
         else:
-            # Rank by confidence-adjusted edge, then dedupe to one-per-player
-            candidates = candidates.sort_values("confidence_edge", ascending=False)
-            seen_players = set()
-            picks = []
-            for _, r in candidates.iterrows():
-                if r["player_name"] in seen_players:
+            # ── Tier picks by win-probability ────────────────────────────
+            #   🟢 LOCK   ≥75%
+            #   🟡 STRONG 65-75%
+            #   🔴 EDGE   60-65% (gets in only via high edge / confidence)
+            tiers = [
+                ("🟢", "LOCKS",  "≥ 75% win prob — lowest variance",   0.75, 1.01,  "#00FF88", "nba-card-strong"),
+                ("🟡", "STRONG", "65–75% win prob — solid signal",     0.65, 0.75,  "#FFD700", "nba-card-soft"),
+                ("🔴", "EDGE",   "60–65% — pure edge plays",          0.60, 0.65,  "#FF6B35", "nba-card-soft"),
+            ]
+
+            for emoji, tier_name, tier_sub, lo, hi, accent, css_class in tiers:
+                tier_picks = [p for p in picks_all if lo <= p["model_prob"] < hi]
+                if not tier_picks:
                     continue
-                seen_players.add(r["player_name"])
-                picks.append(r)
-                if len(picks) >= MUST_MAX_PICKS:
-                    break
 
-            # Headline summary
-            total_kelly = sum(p.get("kelly_quarter", 0) or 0 for p in picks)
-            st.markdown(f"""
-            <div class="nba-card nba-card-hammer">
-              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
-                <div>
-                  <span class="tag-hammer">🔨 {len(picks)} PLAYS · QTR-KELLY ${total_kelly:.0f}</span>
-                  <div style="font-size:18px; font-weight:700; margin-top:8px; color:#E2E2EE;">
-                    Tonight's high-conviction slate
-                  </div>
-                  <div style="font-size:12px; color:#888; margin-top:3px;">
-                    Filters: prob ≥{MUST_MIN_PROB*100:.0f}% · edge ≥{MUST_MIN_EDGE*100:.0f}% ·
-                    market_conf ≥{MUST_MIN_CONFIDENCE} · max {MUST_MAX_PICKS} picks · ≤1 per player
-                  </div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+                # Header metrics — 3-column row to mirror Auto Parlays' PARLAY/HIT%/EDGE
+                avg_win  = sum(p["model_prob"]*100 for p in tier_picks) / len(tier_picks)
+                avg_edge = sum(p["edge"]*100      for p in tier_picks) / len(tier_picks)
+                kelly_total = sum(p.get("kelly_quarter", 0) or 0 for p in tier_picks)
 
-            # Render each pick as a clean card
-            for r in picks:
-                conf = float(r.get("market_confidence", 1.0))
-                conf_tag = ("🔥 PROVEN" if conf >= 1.20 else
-                            "✓ STRONG" if conf >= 1.10 else
-                            "✓ OK")
-                tag_alt = '<span class="tag-alt">🪜 ALT</span>' if r.get("is_alt") else '<span class="tag-main">MAIN</span>'
+                # Render the tier card with bulleted picks (mirrors Auto Parlays)
+                bullet_html = ""
+                for p in tier_picks:
+                    line = p["line"]
+                    line_str = f"{line:g}" if line is not None else ""
+                    market_lbl = _market_label(p["market_base"])
+                    price = fmt_odds(p["best_price"])
+                    book  = _book_short(p["best_book"])
+                    bullet_html += (
+                        f'<div style="font-size:14px;color:#E2E2EE;margin:8px 0;line-height:1.5">'
+                        f'• <strong>{p["player_name"]}</strong> '
+                        f'<span style="color:#666688">({p["team_abbr"]})</span> — '
+                        f'{p["over_under"]} <strong>{line_str}</strong> {market_lbl} '
+                        f'<span style="color:#888">@ {price} ({book})</span> '
+                        f'&nbsp;<span style="color:#00D4FF;font-size:12px;font-weight:600">'
+                        f'{p["model_prob"]*100:.1f}%</span> '
+                        f'<span style="color:#00FF88;font-size:12px;font-weight:600">'
+                        f'+{p["edge"]*100:.1f}%</span>'
+                        f'</div>'
+                    )
 
                 st.markdown(f"""
-                <div class="nba-card nba-card-strong">
-                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
-                    <div style="flex:1; min-width:280px;">
-                      <div style="font-size:16px; font-weight:800; color:#E2E2EE;">
-                        {r['player_name']} <span style="color:#888;font-weight:400;">({r['team_abbr']})</span>
+                <div class="nba-card {css_class}" style="border-left:3px solid {accent};">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:8px;">
+                    <div style="flex:1;min-width:280px">
+                      <div style="font-size:16px;font-weight:800;color:{accent}">
+                        {emoji} {tier_name}
                       </div>
-                      <div style="font-size:14px; color:#B8B8D4; margin-top:4px;">
-                        {r['over_under']} <strong>{r['line']}</strong> {_market_label(r['market_base'])}
-                        &nbsp; {tag_alt}
-                        &nbsp; <span style="color:#00FF88;font-size:11px;font-weight:700;">{conf_tag} ({conf:.2f}x)</span>
-                      </div>
+                      <div style="font-size:12px;color:#888;margin-top:2px">{tier_sub}</div>
                     </div>
-                    <div style="display:flex; gap:18px; flex-wrap:wrap;">
-                      <div class="stat-block"><div class="stat-label">EDGE</div>{_edge_badge(r['edge'])}</div>
-                      <div class="stat-block"><div class="stat-label">WIN %</div>
-                        <div class="stat-value" style="color:#00D4FF;">{r['model_prob']*100:.1f}%</div></div>
-                      <div class="stat-block"><div class="stat-label">PRICE</div>
-                        <div class="stat-value">{fmt_odds(r['best_price'])}</div>
-                        <div class="stat-sub">{_book_short(r['best_book'])}</div></div>
-                      <div class="stat-block"><div class="stat-label">¼ KELLY</div>
-                        <div class="stat-value" style="color:#00FF88;">${r['kelly_quarter']:.0f}</div></div>
+                    <div style="display:flex;gap:24px;flex-wrap:wrap">
+                      <div class="stat-block"><div class="stat-label">PICKS</div>
+                        <div class="stat-value">{len(tier_picks)}</div></div>
+                      <div class="stat-block"><div class="stat-label">AVG WIN %</div>
+                        <div class="stat-value" style="color:#00D4FF">{avg_win:.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">AVG EDGE</div>
+                        <div class="stat-value" style="color:#00FF88">+{avg_edge:.1f}%</div></div>
+                      <div class="stat-block"><div class="stat-label">¼K TOTAL</div>
+                        <div class="stat-value" style="color:#00FF88">${kelly_total:.0f}</div></div>
                     </div>
+                  </div>
+                  <div style="margin-top:6px">
+                    {bullet_html}
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.divider()
+            # Slate summary footer
+            total_picks = len(picks_all)
+            total_kelly = sum(p.get("kelly_quarter", 0) or 0 for p in picks_all)
             st.caption(
-                "💡 ¼ Kelly is the recommended sizing — these are confidence-weighted "
-                "stakes already. Risk-of-ruin is lower than full Kelly while still "
-                "scaling with edge magnitude. **Don't add markets we've cut** "
-                "(ast / reb) even if you see them elsewhere on the slate."
+                f"💡 **{total_picks} total plays · ¼-Kelly ${total_kelly:.0f}** total exposure. "
+                f"Filters: prob ≥{MUST_MIN_PROB*100:.0f}% · edge ≥{MUST_MIN_EDGE*100:.0f}% · "
+                f"market_conf ≥{MUST_MIN_CONFIDENCE}. ¼-Kelly already factors in market "
+                f"historical ROI — sizing reflects which markets the model has proven it can beat."
             )
 
 
