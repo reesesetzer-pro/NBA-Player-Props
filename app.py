@@ -19,7 +19,7 @@ from models.parlay import Leg, build_parlay, rank_combinations
 
 
 st.set_page_config(
-    page_title="NBA Player Props Model",
+    page_title="NBA · MUST TAKE [v2]",
     page_icon="https://cdn.nba.com/logos/leagues/logo-nba.svg",
     layout="wide",
     initial_sidebar_state="collapsed",
