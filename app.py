@@ -1300,3 +1300,4 @@ with tabs[7]:
             "placed_at", "player_name", "market_base", "line", "over_under",
             "book", "price", "stake", "result", "profit_loss"
         ]], use_container_width=True, hide_index=True)
+
