@@ -10,3 +10,4 @@ python-dotenv>=1.0.0
 plotly>=5.20.0
 pytz>=2024.1
 nba_api>=1.4.0
+# rev: 2026-05-04 force Cloud rebuild
