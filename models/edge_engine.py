@@ -85,6 +85,45 @@ def _player_recent_logs(logs_df: pd.DataFrame, player_name_norm: str, stat: str,
     return [float(v) for v in sub[stat].tolist() if pd.notna(v)]
 
 
+def _player_playoff_aware_logs(
+    logs_df: pd.DataFrame,
+    player_name_norm: str,
+    stat: str,
+    is_playoff_context: bool,
+    n: int = 60,
+    min_playoff_samples: int = 5,
+) -> list[float]:
+    """Playoff-aware variant of `_player_recent_logs`.
+
+    Why this exists: in playoffs, role-player minutes contract sharply
+    (e.g. Sam Merrill went from 28-32 min in regular season to 17-23 min
+    in Round 1). The default last-60 window contaminates the fit with
+    high-minute regular-season games that no longer reflect the player's
+    role. When a player has at least `min_playoff_samples` playoff games,
+    use ONLY playoff games for the recent window — `fit_distribution`
+    will then blend that against the full-season μ correctly.
+
+    Falls back to the regular last-`n` window when:
+      - is_playoff_context is False, OR
+      - the player has fewer than `min_playoff_samples` playoff games
+        (sample too small to trust)
+    """
+    if logs_df.empty:
+        return []
+    sub = logs_df[logs_df["player_name_norm"] == player_name_norm].copy()
+    if sub.empty:
+        return []
+    sub["game_date"] = pd.to_datetime(sub["game_date"], errors="coerce")
+    sub = sub.sort_values("game_date")
+
+    if is_playoff_context and "season_type" in sub.columns:
+        playoff_sub = sub[sub["season_type"].astype(str).str.lower() == "playoffs"]
+        if len(playoff_sub) >= min_playoff_samples:
+            sub = playoff_sub
+    sub = sub.tail(n)
+    return [float(v) for v in sub[stat].tolist() if pd.notna(v)]
+
+
 def _no_vig_consensus(
     prices: list[int],
     opp_prices: list[int],
@@ -288,9 +327,13 @@ def calculate_edges_for_game(
         days_rest = (game_row.get("rest_days_home") if team_abbr == game_row["home_abbr"]
                      else game_row.get("rest_days_away"))
 
-        cache_key = (player_norm, stat)
+        # Cache key includes playoff flag — same player gets a separate fit
+        # for playoff games so role-minute changes don't contaminate the model.
+        cache_key = (player_norm, stat, is_playoff)
         if cache_key not in fit_cache:
-            values = _player_recent_logs(logs_df, player_norm, stat)
+            values = _player_playoff_aware_logs(
+                logs_df, player_norm, stat, is_playoff_context=is_playoff,
+            )
             fit_cache[cache_key] = fit_distribution(values)
         dist = fit_cache[cache_key]
         if dist is None:
