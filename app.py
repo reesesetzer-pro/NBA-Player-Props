@@ -19,7 +19,7 @@ from models.parlay import Leg, build_parlay, rank_combinations
 
 
 st.set_page_config(
-    page_title="NBA · MUST TAKE [v2]",
+    page_title="NBA Player Props Model",
     page_icon="https://cdn.nba.com/logos/leagues/logo-nba.svg",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -472,6 +472,8 @@ with tabs[1]:
                 ("🟢 Safer  (≥ -130)",  -130,   99, "Most-likely combo whose parlay still pays at least -130."),
                 ("🟡 Medium (≤ +200)",  100,  200, "Most-likely parlay capped at +200."),
                 ("🔴 Longer (≤ +300)",  201,  300, "Most-likely parlay stretching out to +300."),
+                ("🎰 Plus  (≤ +400)",   301,  400, "Higher-payout combo capped at +400."),
+                ("🚀 Moon  (≤ +500)",   401,  500, "Stretching to +500 — higher variance, higher payout."),
             ]
 
             parlays = []
@@ -1300,4 +1302,3 @@ with tabs[7]:
             "placed_at", "player_name", "market_base", "line", "over_under",
             "book", "price", "stake", "result", "profit_loss"
         ]], use_container_width=True, hide_index=True)
-
