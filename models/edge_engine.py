@@ -56,15 +56,21 @@ MARKET_TO_STAT = {
 #   stl   50.0% /  -9.4% ROI  ≈ (n=18, breakeven)
 #   reb   40.1% / -12.8% ROI  ❌
 #   ast   34.5% / -27.5% ROI  ❌  (model overshoots predicted by 6pp)
-# Cut ast + reb pending rebuild. Re-enable by adding to ENABLED_STATS.
+#
+# Re-enabled 2026-05-05 after variance restructure:
+#   • 8-bucket calibration (fixes longshot/mainline blend that drove the 6pp ast overshoot)
+#   • Playoff-aware fit window (fixes minutes contamination — biggest win for ast/reb)
+#   • Position fix via commonplayerinfo (matters most for ast — opponent PG defense)
+#   • market_confidence multiplier auto-dampens Kelly based on prior ROI
+#     (ast → ~0.70x, reb → ~0.87x until they earn the multiplier back)
 ENABLED_STATS = {
     "pts",
     "pra",
     "fg3m",
     "blk",
     "stl",
-    # "reb",   # disabled 2026-05-04 — pending rebuild (-12.8% ROI on n=162)
-    # "ast",   # disabled 2026-05-04 — pending rebuild (-27.5% ROI on n=116)
+    "reb",
+    "ast",
 }
 
 
