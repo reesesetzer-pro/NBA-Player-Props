@@ -167,8 +167,9 @@ selected_books = [_BOOK_PRETTY_TO_KEY[b] for b in book_choice_pretty] or list(_B
 st.markdown("<hr style='margin:8px 0 16px 0; border:none; border-top:1px solid #1E1E30;' />",
             unsafe_allow_html=True)
 
-tabs = st.tabs(["🎯 MUST TAKE", "Tonight", "⭐ Best Bets", "🎰 +400 Longshots",
-                "🚀 +500 Moonshots", "🎯 Alt Line Builder", "🪜 Player Intel", "📓 Bet Journal"])
+tabs = st.tabs(["🎯 MUST TAKE", "💎 SWEET SPOT", "Tonight", "⭐ Best Bets",
+                "🎰 +400 Longshots", "🚀 +500 Moonshots", "🎯 Alt Line Builder",
+                "🪜 Player Intel", "📓 Bet Journal"])
 
 
 # Pre-load shared data
@@ -329,8 +330,120 @@ with tabs[0]:
             )
 
 
-# ── TAB 1 — Tonight ───────────────────────────────────────────────────────────
+# ── TAB 1 — 💎 SWEET SPOT (data-driven filters from settled-pick history) ────
+# Lifetime grading showed the model is profitable in a narrow band:
+#   • Stats:  pts (+25% ROI), pra (+13%), fg3m (+81%)  — ast/reb cut elsewhere
+#   • Edge:   <7% — model overshoots above that (pts 7-12%: -33%, pra 12-20%: -43%)
+#   • Odds:   +110..+350 sweet spot. Heavy favs (≤-200) are -10% ROI even at 73% WR
+#             because the price doesn't pay. Big dogs (+200..+350) are +29% ROI.
+#   • Probs:  no minimum — 25-35% prob band is +84% ROI when paired with plus odds.
+# This tab funnels picks through ALL those filters at once.
 with tabs[1]:
+    st.markdown("## 💎 Sweet Spot")
+    st.caption(
+        "Picks filtered to where the model has lifetime + ROI: profitable stats "
+        "(pts/pra/fg3m), small edges (1-7%), and the +110-to-+350 odds band. "
+        "Heavy favorites (-200 or worse) are excluded — they win 73% of the time "
+        "but ROI is -10% because the price doesn't pay."
+    )
+
+    if edges_df.empty:
+        st.info("No edges yet — run the sync first.")
+    else:
+        SS_STATS  = {"pts", "pra", "fg3m"}
+        SS_EDGE_LO, SS_EDGE_HI = 0.01, 0.07
+        SS_PRICE_LO, SS_PRICE_HI = -110, 350
+
+        ss = edges_df[
+            edges_df["market_base"].isin(SS_STATS)
+            & (edges_df["edge"] >= SS_EDGE_LO)
+            & (edges_df["edge"] <  SS_EDGE_HI)
+            & (edges_df["best_price"] >= SS_PRICE_LO)
+            & (edges_df["best_price"] <= SS_PRICE_HI)
+        ].copy()
+
+        # Score by historical sub-bucket ROI from our 1000-pick analysis.
+        # pts 4-7% edge is +57% ROI (n=50); fg3m <4% is +130% (n=50, volatile);
+        # pra <4% is +32%; pts <4% is +42%; pra 4-7% is -48% (excluded by HI gate).
+        def _historical_roi_score(row) -> float:
+            stat = row["market_base"]; e = float(row["edge"])
+            if stat == "pts" and 0.04 <= e < 0.07:   return 0.576  # best
+            if stat == "fg3m" and e < 0.04:          return 1.30   # huge but volatile
+            if stat == "pts" and e < 0.04:           return 0.426
+            if stat == "pra" and e < 0.04:           return 0.329
+            if stat == "fg3m" and 0.04 <= e < 0.07:  return 0.110
+            return 0.05  # default neutral
+
+        ss["historical_roi"] = ss.apply(_historical_roi_score, axis=1)
+        # Sort: highest historical ROI first, then by edge as tiebreaker
+        ss = ss.sort_values(["historical_roi", "edge"], ascending=[False, False])
+        # Dedupe — one pick per (player, stat) keeping the strongest
+        ss = ss.drop_duplicates(subset=["player_name", "market_base"], keep="first")
+
+        if ss.empty:
+            st.warning("No picks clear all sweet-spot filters tonight. Tighter "
+                       "than usual — try Best Bets with manual filters.")
+        else:
+            st.success(f"**{len(ss)} sweet-spot plays tonight** — sorted by lifetime ROI bucket")
+
+            # Show top tier explicitly (pts 4-7% — +57% ROI lifetime)
+            top_tier = ss[ss["historical_roi"] >= 0.50]
+            if not top_tier.empty:
+                st.markdown("### 🥇 GOLD — pts at 4-7% edge (lifetime +57% ROI)")
+                st.caption(f"{len(top_tier)} picks — the single highest-ROI bucket in the data.")
+                _render_table = top_tier[[
+                    "player_name", "market_base", "line", "over_under",
+                    "best_price", "best_book", "model_prob", "edge", "kelly_quarter"
+                ]].copy()
+                _render_table.columns = ["Player", "Stat", "Line", "Side",
+                                         "Price", "Book", "Win %", "Edge", "¼-Kelly $"]
+                _render_table["Win %"] = (_render_table["Win %"] * 100).round(1).astype(str) + "%"
+                _render_table["Edge"]  = (_render_table["Edge"] * 100).round(1).astype(str) + "%"
+                _render_table["¼-Kelly $"] = _render_table["¼-Kelly $"].round(0).astype(int)
+                st.dataframe(_render_table, hide_index=True, use_container_width=True)
+
+            mid_tier = ss[(ss["historical_roi"] >= 0.30) & (ss["historical_roi"] < 0.50)]
+            if not mid_tier.empty:
+                st.markdown("### 🥈 SILVER — pts/pra small-edge (+33-43% ROI lifetime)")
+                st.caption(f"{len(mid_tier)} picks.")
+                _render_table = mid_tier[[
+                    "player_name", "market_base", "line", "over_under",
+                    "best_price", "best_book", "model_prob", "edge", "kelly_quarter"
+                ]].copy()
+                _render_table.columns = ["Player", "Stat", "Line", "Side",
+                                         "Price", "Book", "Win %", "Edge", "¼-Kelly $"]
+                _render_table["Win %"] = (_render_table["Win %"] * 100).round(1).astype(str) + "%"
+                _render_table["Edge"]  = (_render_table["Edge"] * 100).round(1).astype(str) + "%"
+                _render_table["¼-Kelly $"] = _render_table["¼-Kelly $"].round(0).astype(int)
+                st.dataframe(_render_table, hide_index=True, use_container_width=True)
+
+            volatile_tier = ss[ss["historical_roi"] >= 1.0]
+            if not volatile_tier.empty:
+                st.markdown("### 💎 fg3m — small-sample volatility (+130% ROI on n=50)")
+                st.caption("High variance bucket. Treat each leg as a small bet.")
+                _render_table = volatile_tier[[
+                    "player_name", "market_base", "line", "over_under",
+                    "best_price", "best_book", "model_prob", "edge", "kelly_quarter"
+                ]].copy()
+                _render_table.columns = ["Player", "Stat", "Line", "Side",
+                                         "Price", "Book", "Win %", "Edge", "¼-Kelly $"]
+                _render_table["Win %"] = (_render_table["Win %"] * 100).round(1).astype(str) + "%"
+                _render_table["Edge"]  = (_render_table["Edge"] * 100).round(1).astype(str) + "%"
+                _render_table["¼-Kelly $"] = _render_table["¼-Kelly $"].round(0).astype(int)
+                st.dataframe(_render_table, hide_index=True, use_container_width=True)
+
+            st.markdown("---")
+            st.caption(
+                "**Why this tab exists:** the model overshoots edge above 7% "
+                "(pts 7-12%: -33% ROI; pra 12-20%: -43% ROI) and the heavy "
+                "favorites it gets right (-200 or worse, 73% WR) bleed -10% "
+                "ROI because the price doesn't pay. This tab keeps you out of "
+                "both traps."
+            )
+
+
+# ── TAB 2 — Tonight ───────────────────────────────────────────────────────────
+with tabs[2]:
     if games_df.empty:
         if n_started:
             st.info(f"All {n_started} of today's games have already started — no pre-game opportunities left. Check back tomorrow.")
@@ -468,17 +581,46 @@ with tabs[1]:
                     book        = str(r["best_book"]),
                 ))
 
+            # Sweet-spot leg pool: high-prob legs from profitable stats only,
+            # in the small-edge band where the model has proven +ROI. Used to
+            # build the 💎 Sweet (+250..+350) tier specifically — keeps ast/reb
+            # legs and 7%+ overshoot edges out of the parlay search.
+            sweet_pool_df = (
+                slate_qualifying[
+                    slate_qualifying["market_base"].isin(["pts", "pra", "fg3m"])
+                    & (slate_qualifying["edge"] < 0.07)
+                    & (slate_qualifying["model_prob"] >= 0.55)  # need plausible legs
+                ]
+                .sort_values("model_prob", ascending=False)
+                .drop_duplicates(subset=["player_name"])
+                .head(20)
+            )
+            sweet_leg_pool: list[Leg] = []
+            for _, r in sweet_pool_df.iterrows():
+                sweet_leg_pool.append(Leg(
+                    player_name = str(r["player_name"]),
+                    team_abbr   = str(r.get("team_abbr") or ""),
+                    market_base = str(r.get("market_base") or ""),
+                    line        = float(r["line"]),
+                    over_under  = str(r["over_under"]),
+                    price       = int(r["best_price"]),
+                    model_prob  = float(r["model_prob"]),
+                    game_id     = str(r["game_id"]),
+                    book        = str(r["best_book"]),
+                ))
+
             tiers = [
-                ("🟢 Safer  (≥ -130)",  -130,   99, "Most-likely combo whose parlay still pays at least -130."),
-                ("🟡 Medium (≤ +200)",  100,  200, "Most-likely parlay capped at +200."),
-                ("🔴 Longer (≤ +300)",  201,  300, "Most-likely parlay stretching out to +300."),
-                ("🎰 Plus  (≤ +400)",   301,  400, "Higher-payout combo capped at +400."),
-                ("🚀 Moon  (≤ +500)",   401,  500, "Stretching to +500 — higher variance, higher payout."),
+                ("🟢 Safer  (≥ -130)",       -130,   99,  leg_pool,       "Most-likely combo whose parlay still pays at least -130."),
+                ("🟡 Medium (≤ +200)",        100,  200,  leg_pool,       "Most-likely parlay capped at +200."),
+                ("🔴 Longer (≤ +300)",        201,  300,  leg_pool,       "Most-likely parlay stretching out to +300."),
+                ("💎 Sweet  (+250..+350)",    250,  350,  sweet_leg_pool, "High-prob parlay using only profitable stats (pts/pra/fg3m) at sweet-spot edges (1-7%). Targets the lifetime +ROI band."),
+                ("🎰 Plus   (≤ +400)",        301,  400,  leg_pool,       "Higher-payout combo capped at +400."),
+                ("🚀 Moon   (≤ +500)",        401,  500,  leg_pool,       "Stretching to +500 — higher variance, higher payout."),
             ]
 
             parlays = []
-            for label, lo, hi, blurb in tiers:
-                p = _best_parlay_in_band(leg_pool, lo, hi)
+            for label, lo, hi, pool_for_tier, blurb in tiers:
+                p = _best_parlay_in_band(pool_for_tier, lo, hi)
                 if p is not None:
                     parlays.append((label, blurb, p))
 
@@ -595,7 +737,7 @@ with tabs[1]:
 
 
 # ── TAB 2 — Best Bets ─────────────────────────────────────────────────────────
-with tabs[2]:
+with tabs[3]:
     if edges_df.empty:
         st.info("No edges yet — run odds_sync + edge_engine first.")
     else:
@@ -767,7 +909,7 @@ def _render_longshot_tab(min_price: int, label: str, threshold_text: str):
         """, unsafe_allow_html=True)
 
 
-with tabs[3]:
+with tabs[4]:
     _render_longshot_tab(
         min_price=400, label="🎰 +400 Longshots",
         threshold_text="Picks priced at +400 or higher (≤20% implied). "
@@ -775,7 +917,7 @@ with tabs[3]:
     )
 
 # ── TAB 4 — 🚀 +500 Moonshots ─────────────────────────────────────────────────
-with tabs[4]:
+with tabs[5]:
     _render_longshot_tab(
         min_price=500, label="🚀 +500 Moonshots",
         threshold_text="Picks priced at +500 or higher (≤17% implied). "
@@ -783,7 +925,7 @@ with tabs[4]:
     )
 
 # ── TAB 5 — 🎯 Alt Line Builder ──────────────────────────────────────────────
-with tabs[5]:
+with tabs[6]:
     st.markdown("""
     <div style="margin-bottom:18px;">
       <div style="font-size:18px; font-weight:700; color:#E2E2EE;">
@@ -1240,7 +1382,7 @@ with tabs[5]:
 
 
 # ── TAB 6 — 🪜 Player Intel (alt ladder for one player) ───────────────────────
-with tabs[6]:
+with tabs[7]:
     if edges_df.empty:
         st.info("Run sync first.")
     else:
@@ -1283,7 +1425,7 @@ with tabs[6]:
 
 
 # ── TAB 7 — 📓 Bet Journal ────────────────────────────────────────────────────
-with tabs[7]:
+with tabs[8]:
     bets = fetch("nba_bets", limit=500)
     if bets.empty:
         st.info("No bets logged yet.")
