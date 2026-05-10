@@ -74,6 +74,67 @@ ENABLED_STATS = {
 }
 
 
+_MAX_PLAUSIBLE_EDGE = 0.25  # >25pp edge on a player prop is almost always model overshoot
+_PAIRED_SUM_TOLERANCE = 0.05
+
+
+def _sanity_filter(edges: list[dict]) -> list[dict]:
+    """Defensive filter applied right before edges are written to the DB.
+
+    1. For each (player, stat, line), Over+Under model_probs should sum to
+       exactly 1.0 since they're complements of a single distribution. After
+       independent calibration they can drift, so renormalize.
+    2. Suppress any edge whose absolute value exceeds _MAX_PLAUSIBLE_EDGE.
+       Lifetime data shows pts/pra edges >7% have NEGATIVE ROI; >25pp is
+       almost always pure model error.
+    """
+    if not edges:
+        return edges
+
+    by_pair: dict[tuple, list[dict]] = {}
+    for e in edges:
+        key = (e.get("game_id"), e.get("player_name_norm"), e.get("market_base"),
+               e.get("line"), e.get("is_alt"))
+        by_pair.setdefault(key, []).append(e)
+
+    renorm = 0
+    for _key, group in by_pair.items():
+        if len(group) != 2:  # need both Over and Under for renormalization
+            continue
+        try:
+            probs = [float(g.get("model_prob") or 0) for g in group]
+        except Exception:
+            continue
+        s = probs[0] + probs[1]
+        if s <= 0:
+            continue
+        if abs(s - 1.0) > _PAIRED_SUM_TOLERANCE:
+            for g, p in zip(group, probs):
+                new_prob = round(p / s, 4)
+                novig = float(g.get("market_prob_novig") or 0)
+                g["model_prob"] = new_prob
+                g["edge"] = round(new_prob - novig, 4)
+            renorm += 1
+
+    if renorm:
+        print(f"[edge] sanity: renormalized {renorm} player/stat/line pairs (sum != 1.0)")
+
+    kept = []
+    suppressed = 0
+    for e in edges:
+        try:
+            edge_val = abs(float(e.get("edge") or 0))
+        except Exception:
+            edge_val = 0
+        if edge_val > _MAX_PLAUSIBLE_EDGE:
+            suppressed += 1
+            continue
+        kept.append(e)
+    if suppressed:
+        print(f"[edge] sanity: suppressed {suppressed} edges above {_MAX_PLAUSIBLE_EDGE*100:.0f}pp (model overshoot)")
+    return kept
+
+
 def _make_id(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
@@ -581,6 +642,10 @@ def calculate_all_edges() -> int:
                   ", ".join(f"{m}={market_conf[m]:.2f}" for m in sorted(market_conf)))
     except Exception as conf_err:
         print(f"[edge] market confidence skipped: {conf_err}")
+
+    # ── Sanity filter ────────────────────────────────────────────────────────
+    # Defensive guard against per-side calibration drift and model overshoot.
+    all_edges = _sanity_filter(all_edges)
 
     # Upsert via the helper — handles NaN cleaning + dedupe-by-id automatically
     upsert("nba_prop_edges", all_edges, on_conflict="id")
