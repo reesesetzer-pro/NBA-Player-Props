@@ -353,6 +353,7 @@ with tabs[1]:
         SS_STATS  = {"pts", "pra", "fg3m"}
         SS_EDGE_LO, SS_EDGE_HI = 0.01, 0.07
         SS_PRICE_LO, SS_PRICE_HI = -110, 350
+        SS_MIN_PROB = 0.60  # confidence floor — only show 60%+ picks
 
         ss = edges_df[
             edges_df["market_base"].isin(SS_STATS)
@@ -360,6 +361,7 @@ with tabs[1]:
             & (edges_df["edge"] <  SS_EDGE_HI)
             & (edges_df["best_price"] >= SS_PRICE_LO)
             & (edges_df["best_price"] <= SS_PRICE_HI)
+            & (edges_df["model_prob"] >= SS_MIN_PROB)
         ].copy()
 
         # Score by historical sub-bucket ROI from our 1000-pick analysis.
