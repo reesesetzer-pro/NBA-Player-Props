@@ -341,34 +341,45 @@ with tabs[0]:
 with tabs[1]:
     st.markdown("## 💎 Sweet Spot")
     st.caption(
-        "Picks filtered to where the model has lifetime + ROI: profitable stats "
-        "(pts/pra/fg3m), small edges (1-7%), and the +110-to-+350 odds band. "
-        "Heavy favorites (-200 or worse) are excluded — they win 73% of the time "
-        "but ROI is -10% because the price doesn't pay."
+        "Per-stat edge filtering based on lifetime ROI buckets: "
+        "**pts** 1-7% edge (both <4% and 4-7% buckets are +42% and +57% ROI), "
+        "**pra** 1-4% edge only (4-7% is -48% — the trap), "
+        "**fg3m** 1-4% edge only (small sample at 4-7%). "
+        "Plus 60% prob floor and -250 to +350 price band."
     )
 
     if edges_df.empty:
         st.info("No edges yet — run the sync first.")
     else:
-        SS_STATS  = {"pts", "pra", "fg3m"}
-        SS_EDGE_LO, SS_EDGE_HI = 0.01, 0.07
-        # Price floor widened 2026-05-15 from -110 → -250. With the 60% prob
-        # floor below, the picks that survive are by definition heavy favorites
-        # (model says 60%+, market agrees and prices accordingly). The
-        # historical pts+edge-bucket analysis (+57% ROI on pts at 4-7% edge)
-        # was averaged across all prices, so the -150..-200 range needs to be
-        # IN the filter to surface the Gold picks the lifetime data trained on.
+        # Per-stat edge bands — calibrated from settled-pick history:
+        #   pts:  <4% = +42% (n=230) | 4-7% = +57% (n=50)    → keep both
+        #   pra:  <4% = +32% (n=143) | 4-7% = -48% (n=24)    → keep <4% only
+        #   fg3m: <4% = +130% (n=50) | 4-7% = +11% (n=10)    → keep <4% (high vol)
+        SS_EDGE_BANDS = {
+            "pts":  (0.01, 0.07),
+            "pra":  (0.01, 0.04),
+            "fg3m": (0.01, 0.04),
+        }
+        # Price floor at -250 includes the Gold-bucket favorites (-150..-200
+        # where pts 4-7% lifetime data was trained). Heavy chalk past -250 is
+        # still excluded — that's the documented "price doesn't pay" zone.
         SS_PRICE_LO, SS_PRICE_HI = -250, 350
         SS_MIN_PROB = 0.60  # confidence floor — only show 60%+ picks
 
-        ss = edges_df[
-            edges_df["market_base"].isin(SS_STATS)
-            & (edges_df["edge"] >= SS_EDGE_LO)
-            & (edges_df["edge"] <  SS_EDGE_HI)
-            & (edges_df["best_price"] >= SS_PRICE_LO)
-            & (edges_df["best_price"] <= SS_PRICE_HI)
-            & (edges_df["model_prob"] >= SS_MIN_PROB)
-        ].copy()
+        # Build per-stat filters and union the results
+        ss_parts = []
+        for stat, (lo, hi) in SS_EDGE_BANDS.items():
+            part = edges_df[
+                (edges_df["market_base"] == stat)
+                & (edges_df["edge"] >= lo)
+                & (edges_df["edge"] <  hi)
+                & (edges_df["best_price"] >= SS_PRICE_LO)
+                & (edges_df["best_price"] <= SS_PRICE_HI)
+                & (edges_df["model_prob"] >= SS_MIN_PROB)
+            ]
+            if not part.empty:
+                ss_parts.append(part)
+        ss = pd.concat(ss_parts, ignore_index=True).copy() if ss_parts else edges_df.iloc[0:0].copy()
 
         # Score by historical sub-bucket ROI from our 1000-pick analysis.
         # pts 4-7% edge is +57% ROI (n=50); fg3m <4% is +130% (n=50, volatile);
