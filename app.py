@@ -405,8 +405,10 @@ with tabs[1]:
         else:
             st.success(f"**{len(ss)} sweet-spot plays tonight** — sorted by lifetime ROI bucket")
 
-            # Show top tier explicitly (pts 4-7% — +57% ROI lifetime)
-            top_tier = ss[ss["historical_roi"] >= 0.50]
+            # Show top tier explicitly (pts 4-7% — +57% ROI lifetime).
+            # Bound at <1.0 so fg3m <4% (score 1.30) doesn't bleed in — it
+            # has its own VOLATILE section below.
+            top_tier = ss[(ss["historical_roi"] >= 0.50) & (ss["historical_roi"] < 1.0)]
             if not top_tier.empty:
                 st.markdown("### 🥇 GOLD — pts at 4-7% edge (lifetime +57% ROI)")
                 st.caption(f"{len(top_tier)} picks — the single highest-ROI bucket in the data.")
