@@ -352,7 +352,13 @@ with tabs[1]:
     else:
         SS_STATS  = {"pts", "pra", "fg3m"}
         SS_EDGE_LO, SS_EDGE_HI = 0.01, 0.07
-        SS_PRICE_LO, SS_PRICE_HI = -110, 350
+        # Price floor widened 2026-05-15 from -110 → -250. With the 60% prob
+        # floor below, the picks that survive are by definition heavy favorites
+        # (model says 60%+, market agrees and prices accordingly). The
+        # historical pts+edge-bucket analysis (+57% ROI on pts at 4-7% edge)
+        # was averaged across all prices, so the -150..-200 range needs to be
+        # IN the filter to surface the Gold picks the lifetime data trained on.
+        SS_PRICE_LO, SS_PRICE_HI = -250, 350
         SS_MIN_PROB = 0.60  # confidence floor — only show 60%+ picks
 
         ss = edges_df[
